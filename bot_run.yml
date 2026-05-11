@@ -1,0 +1,34 @@
+name: YouTube Email Bot
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Cloudflare WARP
+      uses: fscarmen/warp-on-actions@v1.2
+      
+    - name: Install FFmpeg
+      run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: pip install -r requirements.txt
+
+    - name: Run Bot
+      env:
+        GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+        GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+        GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+      run: python main.py
