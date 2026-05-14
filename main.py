@@ -33,35 +33,42 @@ def create_drive_folder(service, folder_name, parent_id):
     return file['id'], file['webViewLink']
 
 def upload_to_drive(service, local_path, parent_drive_id):
-    """פונקציה חכמה שמעלה תיקיות וקבצים לדרייב בצורה היררכית"""
+    """פונקציה חכמה שמעלה תיקיות וקבצים ומחזירה רק את ה-ID של מה שהועלה באמת"""
     uploaded_links = []
+    items_to_share = [] # רשימה של התיקיות/קבצים הספציפיים שנוצרו עכשיו
     
-    if os.path.isfile(local_path):
-        name = os.path.basename(local_path)
-        media = MediaFileUpload(local_path, resumable=True)
-        file = service.files().create(body={'name': name, 'parents': [parent_drive_id]}, media_body=media, fields='id, webViewLink').execute()
-        return [file['webViewLink']], file['id']
-        
+    if not os.path.exists(local_path):
+        return [], []
+
+    folder_mapping = {'.': parent_drive_id}
+    
     for root, dirs, files in os.walk(local_path):
         rel_path = os.path.relpath(root, local_path)
-        current_parent = parent_drive_id
+        current_parent = folder_mapping.get(rel_path, parent_drive_id)
         
-        if rel_path != '.':
-            for folder in rel_path.split(os.sep):
-                current_parent, folder_link = create_drive_folder(service, folder, current_parent)
-                if folder_link not in uploaded_links: uploaded_links.append(folder_link)
+        for d in dirs:
+            dir_path = os.path.normpath(os.path.join(rel_path, d))
+            folder_id, folder_link = create_drive_folder(service, d, current_parent)
+            folder_mapping[dir_path] = folder_id
+            if folder_link not in uploaded_links: 
+                uploaded_links.append(folder_link)
+            # אם זו התיקייה העליונה ביותר של האמן/פלייליסט - נשמור את ה-ID שלה לשיתוף מדויק
+            if rel_path == '.':
+                items_to_share.append(folder_id)
                 
         for f in files:
             file_path = os.path.join(root, f)
-            if file_path.endswith('.description'): continue # מדלג על קובץ הטקסט אחרי שהוטמע
+            if file_path.endswith('.description'): continue
             media = MediaFileUpload(file_path, resumable=True)
-            file = service.files().create(body={'name': f, 'parents': [current_parent]}, media_body=media, fields='webViewLink').execute()
+            file = service.files().create(body={'name': f, 'parents': [current_parent]}, media_body=media, fields='id, webViewLink').execute()
             uploaded_links.append(file['webViewLink'])
+            # אם זה קובץ בודד ללא תיקייה שיושב ישירות ב-downloads
+            if rel_path == '.':
+                items_to_share.append(file['id'])
             
-    return uploaded_links, parent_drive_id
+    return uploaded_links, items_to_share
 
 def embed_lyrics_in_mp3(audio_file, description_file):
-    """שולף טקסט מקובץ התיאור וצורב אותו אל תוך קובץ ה-MP3 כ-Lyrics"""
     if not os.path.exists(description_file): return
     with open(description_file, 'r', encoding='utf-8') as df:
         lyrics = df.read()
@@ -90,13 +97,13 @@ def process_email(drive_svc, gmail_svc, msg_id):
             if part['mimeType'] == 'text/plain' and 'data' in part['body']:
                 body += base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='ignore')
 
-    links = re.findall(r'(https?://(?:www\.)?youtube\.com/[^\s]+|https?://youtu\.be/[^\s]+)', body)
+    # סינון נקי של הקישור
+    links = re.findall(r'(https?://(?:www\.)?youtube\.com/[^\s"\'<>]+|https?://youtu\.be/[^\s"\'<>]+)', body)
     if not links: return False
-    url = links[0]
+    url = links[0].rstrip(')]}.')
 
-    # זיהוי בקשת משתמש: אודיו או וידאו
     is_video = "וידאו" in subject or "וידאו" in body
-    is_audio = not is_video # ברירת מחדל לאודיו
+    is_audio = not is_video
     
     print(f"מעבד בקשה מ: {sender_email} | סוג: {'וידאו' if is_video else 'אודיו'}")
 
@@ -127,13 +134,21 @@ def process_email(drive_svc, gmail_svc, msg_id):
                     desc_file = os.path.join(root, base_name + '.description')
                     embed_lyrics_in_mp3(os.path.join(root, f), desc_file)
 
-    links_res, top_item_id = upload_to_drive(drive_svc, 'downloads', BASE_FOLDER_ID)
+    links_res, ids_to_share = upload_to_drive(drive_svc, 'downloads', BASE_FOLDER_ID)
     
-    if top_item_id:
-        drive_svc.permissions().create(fileId=top_item_id, body={'type': 'user', 'role': 'reader', 'emailAddress': sender_email}).execute()
+    # שיתוף ספציפי אך ורק לקבצים או התיקיות החדשות שנוצרו (כך שתיקיית הבסיס נשארת חסויה)
+    for item_id in ids_to_share:
+        try:
+            drive_svc.permissions().create(fileId=item_id, body={'type': 'user', 'role': 'reader', 'emailAddress': sender_email}).execute()
+        except Exception as e:
+            print(f"שגיאה בשיתוף פריט {item_id}: {e}")
 
-    reply_link = links_res[0] if links_res else "לא נמצא קובץ להעלאה."
-    reply_body = f"היי!\n\nההורדה שלך הסתיימה בהצלחה. הקבצים סודרו בתיקיות ומוכנים עבורך כאן:\n{reply_link}\n\nהאזנה/צפייה נעימה!"
+    # ניסוח המייל בהתאם להצלחה או לכישלון ההורדה
+    if not links_res:
+        reply_body = "היי,\n\nנראה שמשהו השתבש בהורדה. ייתכן שהסרטון פרטי, נמחק, או שהקישור אינו תקין. אנא נסה שוב עם קישור אחר."
+    else:
+        reply_link = links_res[0]
+        reply_body = f"היי!\n\nההורדה שלך הסתיימה בהצלחה. הקבצים סודרו בתיקיות ומוכנים עבורך כאן (ורק אתה מורשה לצפות בהם):\n{reply_link}\n\nהאזנה/צפייה נעימה!"
     
     message = MIMEText(reply_body)
     message['to'] = sender_email
@@ -148,7 +163,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
 
 def main():
     drive_svc, gmail_svc = get_services()
-    # הסינון החדש: קורא רק הודעות עם הנושא יוטיוב שלא נקראו
     results = gmail_svc.users().messages().list(userId='me', q='is:unread subject:יוטיוב').execute()
     messages = results.get('messages', [])
 
