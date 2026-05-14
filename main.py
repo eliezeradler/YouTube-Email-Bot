@@ -100,7 +100,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
     
     print(f"מעבד בקשה מ: {sender_email} | סוג: {'וידאו' if is_video else 'אודיו'}")
 
-    out_tmpl = 'downloads/%(playlist_title|%(uploader)s)s/%(album|Singles)s/%(title)s.%(ext)s'
+    out_tmpl = 'downloads/%(playlist_title,uploader|Unknown)s/%(album|Singles)s/%(title)s.%(ext)s'
     
     ydl_opts = {
         'outtmpl': out_tmpl,
