@@ -98,7 +98,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
                 body += base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='ignore')
 
     # סינון נקי של הקישור
-    links = re.findall(r'(https?://(?:www\.)?youtube\.com/[^\s"\'<>]+|https?://youtu\.be/[^\s"\'<>]+)', body)
+    links = re.findall(r'(https?://(?:www\.|music\.)?youtube\.com/[^\s"\'<>]+|https?://youtu\.be/[^\s"\'<>]+)', body)
     if not links: return False
     url = links[0].rstrip(')]}.')
 
