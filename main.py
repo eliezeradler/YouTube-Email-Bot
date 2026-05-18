@@ -33,9 +33,8 @@ def create_drive_folder(service, folder_name, parent_id):
     return file['id'], file['webViewLink']
 
 def upload_to_drive(service, local_path, parent_drive_id):
-    """פונקציה חכמה שמעלה תיקיות וקבצים ומחזירה רק את ה-ID של מה שהועלה באמת"""
     uploaded_links = []
-    items_to_share = [] # רשימה של התיקיות/קבצים הספציפיים שנוצרו עכשיו
+    items_to_share = [] 
     
     if not os.path.exists(local_path):
         return [], []
@@ -52,7 +51,6 @@ def upload_to_drive(service, local_path, parent_drive_id):
             folder_mapping[dir_path] = folder_id
             if folder_link not in uploaded_links: 
                 uploaded_links.append(folder_link)
-            # אם זו התיקייה העליונה ביותר של האמן/פלייליסט - נשמור את ה-ID שלה לשיתוף מדויק
             if rel_path == '.':
                 items_to_share.append(folder_id)
                 
@@ -62,7 +60,6 @@ def upload_to_drive(service, local_path, parent_drive_id):
             media = MediaFileUpload(file_path, resumable=True)
             file = service.files().create(body={'name': f, 'parents': [current_parent]}, media_body=media, fields='id, webViewLink').execute()
             uploaded_links.append(file['webViewLink'])
-            # אם זה קובץ בודד ללא תיקייה שיושב ישירות ב-downloads
             if rel_path == '.':
                 items_to_share.append(file['id'])
             
@@ -97,15 +94,16 @@ def process_email(drive_svc, gmail_svc, msg_id):
             if part['mimeType'] == 'text/plain' and 'data' in part['body']:
                 body += base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='ignore')
 
-    # סינון נקי של הקישור
     links = re.findall(r'(https?://(?:www\.|music\.)?youtube\.com/[^\s"\'<>]+|https?://youtu\.be/[^\s"\'<>]+)', body)
     if not links: return False
-    url = links[0].rstrip(')]}.')
+    
+    # אוסף את כל הקישורים שבמייל (ולא רק את הראשון)
+    urls = [link.rstrip(')]}.') for link in links]
 
     is_video = "וידאו" in subject or "וידאו" in body
     is_audio = not is_video
     
-    print(f"מעבד בקשה מ: {sender_email} | סוג: {'וידאו' if is_video else 'אודיו'}")
+    print(f"מעבד בקשה מ: {sender_email} | סוג: {'וידאו' if is_video else 'אודיו'} | קישורים להורדה: {len(urls)}")
 
     out_tmpl = 'downloads/%(playlist_title,uploader|Unknown)s/%(album|Singles)s/%(title)s.%(ext)s'
     
@@ -115,21 +113,30 @@ def process_email(drive_svc, gmail_svc, msg_id):
         'ignoreerrors': True,
     }
 
-   if is_audio:
+    if is_audio:
         ydl_opts.update({
             'format': 'bestaudio/best',
-            'writethumbnail': True, # פקודה להורדת התמונה הממוזערת
+            'writethumbnail': True, 
+            # --- הוספת המיפוי של הפרטים למאפייני הקובץ ---
+            'parse_metadata': [
+                '%(artist,uploader|Unknown)s:%(meta_artist)s',             # אמנים משתתפים
+                '%(album_artist,uploader|Unknown)s:%(meta_album_artist)s', # אמן האלבום
+                '%(album,playlist_title,uploader|Unknown)s:%(meta_album)s',# שם האלבום
+                '%(upload_date>%Y|2024)s:%(meta_date)s',                   # שנה
+                '%(playlist_index|1)s:%(meta_track)s',                     # מספר שיר
+                '%(genre|Music)s:%(meta_genre)s'                           # ז'אנר
+            ],
             'postprocessors': [
                 {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
-                {'key': 'FFmpegMetadata', 'add_metadata': True}, # צריבת פרטי השיר (אמן, כותרת)
-                {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}, # הטמעת התמונה עצמה
+                {'key': 'FFmpegMetadata', 'add_metadata': True}, 
+                {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}, 
             ],
         })
     else:
         ydl_opts.update({'format': 'b[ext=mp4]/best'})
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+        ydl.download(urls)
 
     if is_audio:
         for root, dirs, files in os.walk('downloads'):
@@ -141,14 +148,12 @@ def process_email(drive_svc, gmail_svc, msg_id):
 
     links_res, ids_to_share = upload_to_drive(drive_svc, 'downloads', BASE_FOLDER_ID)
     
-    # שיתוף ספציפי אך ורק לקבצים או התיקיות החדשות שנוצרו (כך שתיקיית הבסיס נשארת חסויה)
     for item_id in ids_to_share:
         try:
             drive_svc.permissions().create(fileId=item_id, body={'type': 'user', 'role': 'reader', 'emailAddress': sender_email}).execute()
         except Exception as e:
             print(f"שגיאה בשיתוף פריט {item_id}: {e}")
 
-    # ניסוח המייל בהתאם להצלחה או לכישלון ההורדה
     if not links_res:
         reply_body = "היי,\n\nנראה שמשהו השתבש בהורדה. ייתכן שהסרטון פרטי, נמחק, או שהקישור אינו תקין. אנא נסה שוב עם קישור אחר."
     else:
