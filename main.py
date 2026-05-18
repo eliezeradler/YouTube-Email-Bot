@@ -115,10 +115,15 @@ def process_email(drive_svc, gmail_svc, msg_id):
         'ignoreerrors': True,
     }
 
-    if is_audio:
+   if is_audio:
         ydl_opts.update({
             'format': 'bestaudio/best',
-            'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
+            'writethumbnail': True, # פקודה להורדת התמונה הממוזערת
+            'postprocessors': [
+                {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
+                {'key': 'FFmpegMetadata', 'add_metadata': True}, # צריבת פרטי השיר (אמן, כותרת)
+                {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}, # הטמעת התמונה עצמה
+            ],
         })
     else:
         ydl_opts.update({'format': 'b[ext=mp4]/best'})
