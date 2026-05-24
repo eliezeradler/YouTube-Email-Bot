@@ -24,7 +24,10 @@ def get_services():
     return build('drive', 'v3', credentials=creds), build('gmail', 'v1', credentials=creds)
 
 def create_drive_folder(service, folder_name, parent_id):
-    query = f"name = '{folder_name}' and '{parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    # מנקה גרשיים בודדים וכפולים כדי שלא ישברו את השאילתה של גוגל דרייב
+    safe_query_name = folder_name.replace("'", "\\'").replace('"', '\\"')
+    
+    query = f"name = '{safe_query_name}' and '{parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     res = service.files().list(q=query, fields='files(id, webViewLink)').execute()
     if res.get('files'): return res['files'][0]['id'], res['files'][0]['webViewLink']
     
@@ -79,6 +82,16 @@ def embed_lyrics_in_mp3(audio_file, description_file):
     except Exception as e:
         print(f"שגיאה בהטמעת מילים: {e}")
 
+def extract_body_from_payload(payload):
+    """פונקציה חכמה שחופרת פנימה ושואבת את הטקסט מכל השכבות (HTML/Plain) של המייל"""
+    body = ""
+    if 'parts' in payload:
+        for part in payload['parts']:
+            body += extract_body_from_payload(part)
+    elif 'body' in payload and 'data' in payload['body']:
+        body += base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8', errors='ignore')
+    return body
+
 def process_email(drive_svc, gmail_svc, msg_id):
     msg = gmail_svc.users().messages().get(userId='me', id=msg_id).execute()
     headers = msg['payload']['headers']
@@ -86,18 +99,17 @@ def process_email(drive_svc, gmail_svc, msg_id):
     sender_email = re.search(r'[\w\.-]+@[\w\.-]+', sender).group()
     subject = next((h['value'] for h in headers if h['name'] == 'Subject'), "")
     
-    body = ""
-    if 'data' in msg['payload'].get('body', {}):
-        body = base64.urlsafe_b64decode(msg['payload']['body']['data']).decode('utf-8', errors='ignore')
-    elif 'parts' in msg['payload']:
-        for part in msg['payload']['parts']:
-            if part['mimeType'] == 'text/plain' and 'data' in part['body']:
-                body += base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='ignore')
+    # שליפת גוף ההודעה באמצעות פונקציית החפירה העמוקה שלנו
+    body = extract_body_from_payload(msg['payload'])
 
-    links = re.findall(r'(https?://(?:www\.|music\.)?youtube\.com/[^\s"\'<>]+|https?://youtu\.be/[^\s"\'<>]+)', body)
-    if not links: return False
+    # מחפש קישורים בכל ההודעה (גם בנושא וגם בגוף)
+    text_to_search = f"{subject} {body}"
+    links = re.findall(r'(https?://(?:www\.|music\.)?youtube\.com/[^\s"\'<>]+|https?://youtu\.be/[^\s"\'<>]+)', text_to_search)
     
-    # אוסף את כל הקישורים שבמייל (ולא רק את הראשון)
+    if not links:
+        print(f"לא נמצאו קישורים במייל מ-{sender_email}")
+        return False
+    
     urls = [link.rstrip(')]}.') for link in links]
 
     is_video = "וידאו" in subject or "וידאו" in body
@@ -117,14 +129,13 @@ def process_email(drive_svc, gmail_svc, msg_id):
         ydl_opts.update({
             'format': 'bestaudio/best',
             'writethumbnail': True, 
-            # --- הוספת המיפוי של הפרטים למאפייני הקובץ ---
             'parse_metadata': [
-                '%(artist,uploader|Unknown)s:%(meta_artist)s',             # אמנים משתתפים
-                '%(album_artist,uploader|Unknown)s:%(meta_album_artist)s', # אמן האלבום
-                '%(album,playlist_title,uploader|Unknown)s:%(meta_album)s',# שם האלבום
-                '%(upload_date>%Y|2024)s:%(meta_date)s',                   # שנה
-                '%(playlist_index|1)s:%(meta_track)s',                     # מספר שיר
-                '%(genre|Music)s:%(meta_genre)s'                           # ז'אנר
+                '%(artist,uploader|Unknown)s:%(meta_artist)s',
+                '%(album_artist,uploader|Unknown)s:%(meta_album_artist)s',
+                '%(album,playlist_title,uploader|Unknown)s:%(meta_album)s',
+                '%(upload_date>%Y|2024)s:%(meta_date)s',
+                '%(playlist_index|1)s:%(meta_track)s',
+                '%(genre|Music)s:%(meta_genre)s'
             ],
             'postprocessors': [
                 {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
