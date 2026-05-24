@@ -112,6 +112,10 @@ def process_email(drive_svc, gmail_svc, msg_id):
     
     urls = [link.rstrip(')]}.') for link in links]
 
+    # === הפתרון לכפילויות: מסמנים את המייל כ"נקרא" מיד בהתחלה! ===
+    gmail_svc.users().messages().batchModify(userId='me', body={'ids': [msg_id], 'removeLabelIds': ['UNREAD']}).execute()
+    print(f"🔒 המייל מ-{sender_email} סומן כ'נקרא' כדי למנוע כפילויות.")
+
     is_video = "וידאו" in subject or "וידאו" in body
     is_audio = not is_video
     
@@ -176,8 +180,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
     message['subject'] = f"Re: {subject}"
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     gmail_svc.users().messages().send(userId='me', body={'raw': raw, 'threadId': msg['threadId']}).execute()
-
-    gmail_svc.users().messages().batchModify(userId='me', body={'ids': [msg_id], 'removeLabelIds': ['UNREAD']}).execute()
     
     shutil.rmtree('downloads', ignore_errors=True)
     return True
