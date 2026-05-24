@@ -99,29 +99,28 @@ def process_email(drive_svc, gmail_svc, msg_id):
     sender_email = re.search(r'[\w\.-]+@[\w\.-]+', sender).group()
     subject = next((h['value'] for h in headers if h['name'] == 'Subject'), "")
     
-    # שליפת גוף ההודעה באמצעות פונקציית החפירה העמוקה שלנו
     body = extract_body_from_payload(msg['payload'])
 
-    # מחפש קישורים בכל ההודעה (גם בנושא וגם בגוף)
+    # מחפש קישורים בכל ההודעה (מוצא גם יוטיוב וגם תאגיד כאן 11)
     text_to_search = f"{subject} {body}"
-    links = re.findall(r'(https?://(?:www\.|music\.)?youtube\.com/[^\s"\'<>]+|https?://youtu\.be/[^\s"\'<>]+)', text_to_search)
+    links = re.findall(r'(https?://(?:www\.|music\.)?youtube\.com/[^\s"\'<>]+|https?://youtu\.be/[^\s"\'<>]+|https?://(?:www\.)?kan\.org\.il/[^\s"\'<>]+)', text_to_search)
     
+    # מסמנים את המייל כ"נקרא" מיד בהתחלה!
+    gmail_svc.users().messages().batchModify(userId='me', body={'ids': [msg_id], 'removeLabelIds': ['UNREAD']}).execute()
+    print(f"🔒 המייל מ-{sender_email} סומן כ'נקרא' כדי למנוע כפילויות.")
+
     if not links:
-        print(f"לא נמצאו קישורים במייל מ-{sender_email}")
+        print(f"לא נמצאו קישורים נתמכים במייל מ-{sender_email}")
         return False
     
     urls = [link.rstrip(')]}.') for link in links]
-
-    # === הפתרון לכפילויות: מסמנים את המייל כ"נקרא" מיד בהתחלה! ===
-    gmail_svc.users().messages().batchModify(userId='me', body={'ids': [msg_id], 'removeLabelIds': ['UNREAD']}).execute()
-    print(f"🔒 המייל מ-{sender_email} סומן כ'נקרא' כדי למנוע כפילויות.")
 
     is_video = "וידאו" in subject or "וידאו" in body
     is_audio = not is_video
     
     print(f"מעבד בקשה מ: {sender_email} | סוג: {'וידאו' if is_video else 'אודיו'} | קישורים להורדה: {len(urls)}")
 
-    out_tmpl = 'downloads/%(playlist_title,uploader|Unknown)s/%(album|Singles)s/%(title)s.%(ext)s'
+    out_tmpl = 'downloads/%(playlist_title,uploader,extractor_key|Unknown)s/%(album|Singles)s/%(title)s.%(ext)s'
     
     ydl_opts = {
         'outtmpl': out_tmpl,
@@ -186,11 +185,13 @@ def process_email(drive_svc, gmail_svc, msg_id):
 
 def main():
     drive_svc, gmail_svc = get_services()
-    results = gmail_svc.users().messages().list(userId='me', q='is:unread subject:יוטיוב').execute()
+    # הבוט מחפש מיילים שיש להם את המילה 'יוטיוב' או 'כאן' בשורת הנושא
+    query = 'is:unread {subject:יוטיוב subject:כאן}'
+    results = gmail_svc.users().messages().list(userId='me', q=query).execute()
     messages = results.get('messages', [])
 
     if not messages:
-        print("אין מיילים חדשים עם קישורים מיוטיוב.")
+        print("אין מיילים חדשים עם קישורים מיוטיוב או כאן 11.")
         return
 
     for msg in messages:
