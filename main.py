@@ -155,7 +155,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
             ydl_opts = {'outtmpl': out_tmpl, 'writedescription': True, 'ignoreerrors': True}
             
             if is_audio:
-                ydl_opts.update({'format': 'bestaudio/best', 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]})
+                ydl_opts.update({'format': 'bestaudio/best', 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}]})
             else:
                 ydl_opts.update({'format': 'b[ext=mp4]/best'})
 
