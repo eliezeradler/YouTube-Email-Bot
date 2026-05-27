@@ -11,6 +11,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 import shutil
+from urllib.parse import urlparse
 
 # ===== הגדרות =====
 BASE_FOLDER_ID = "12o0xHyXAuj5f3v3nHszVdCKZj8Lxjx-4"
@@ -26,7 +27,6 @@ def get_services():
     return build('drive', 'v3', credentials=creds), build('gmail', 'v1', credentials=creds)
 
 def send_email_reply(gmail_svc, to_email, subject, body, thread_id):
-    """פונקציית עזר לשליחת אימיילים (הצלחה או שגיאה)"""
     message = MIMEText(body)
     message['to'] = to_email
     message['subject'] = subject
@@ -85,47 +85,34 @@ def extract_body_from_payload(payload):
         body += base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8', errors='ignore')
     return body
 
-def download_notebooklm_audio(url, output_folder='downloads/NotebookLM'):
-    os.makedirs(output_folder, exist_ok=True)
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-    }
-    
-    response = requests.get(url, headers=headers, timeout=30)
-    response.raise_for_status()
-    html_content = response.text
-    
-    audio_urls = re.findall(r'https://storage\.googleapis\.com/notebooklm-public-prod[^"\s\'<>]+', html_content)
-    if not audio_urls:
-        audio_urls = re.findall(r'\"(https://[^\"\s]+?\.mp3.*?)\"', html_content)
+def download_generic_file(url, output_folder='downloads/Files'):
+    """פונקציה להורדת קישורים ישירים (כמו האודיו של NotebookLM ששלפנו)"""
+    try:
+        os.makedirs(output_folder, exist_ok=True)
+        response = requests.get(url, stream=True, timeout=30)
+        response.raise_for_status()
         
-    if not audio_urls:
-        drive_ids = re.findall(r'https://docs\.google\.com/uc\?export=download&id=([a-zA-Z0-9_-]+)', html_content)
-        if drive_ids:
-            audio_urls = [f"https://docs.google.com/uc?export=download&id={drive_ids[0]}"]
-
-    # 🔥 אם הוא לא מוצא את האודיו, הוא זורק שגיאה שמכילה את הטקסט שהוא קרא! 🔥
-    if not audio_urls:
-        debug_text = html_content[:1500] # לוקח את 1500 התווים הראשונים של האתר
-        raise Exception(f"לא מצאתי קישור אודיו בקוד האתר. הנה מה שגוגל החזירה לי כשהצצתי בדף:\n\n{debug_text}")
-        
-    audio_url = audio_urls[0].replace('\\u0026', '&')
-    
-    file_res = requests.get(audio_url, stream=True, timeout=60)
-    file_res.raise_for_status()
-    
-    title_match = re.search(r'<title>(.*?)</title>', html_content)
-    title = title_match.group(1).replace(" - NotebookLM", "").strip() if title_match else "NotebookLM_Audio"
-    title = re.sub(r'[\\/*?:"<>|]', "", title) 
-    
-    file_path = os.path.join(output_folder, f"{title}.mp3")
-    with open(file_path, 'wb') as f:
-        for chunk in file_res.iter_content(chunk_size=8192):
-            if chunk:
-                f.write(chunk)
+        filename = ""
+        if "Content-Disposition" in response.headers:
+            filename_match = re.findall("filename=(.+)", response.headers["Content-Disposition"])
+            if filename_match:
+                filename = filename_match[0].strip('"\'')
                 
-    return True
+        if not filename:
+            parsed_url = urlparse(url)
+            filename = os.path.basename(parsed_url.path)
+            
+        if not filename or '.' not in filename:
+            filename = "NotebookLM_Audio.mp3"
+            
+        file_path = os.path.join(output_folder, filename)
+        with open(file_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        return True
+    except Exception as e:
+        raise Exception(f"שגיאה בהורדת הקובץ הישיר: {e}")
 
 def process_email(drive_svc, gmail_svc, msg_id):
     msg = gmail_svc.users().messages().get(userId='me', id=msg_id).execute()
@@ -146,12 +133,14 @@ def process_email(drive_svc, gmail_svc, msg_id):
     urls = [link.rstrip(')]}.') for link in links]
     
     youtube_urls = [url for url in urls if 'youtube.com' in url or 'youtu.be' in url]
-    notebook_urls = [url for url in urls if 'notebooklm.google' in url]
+    # כל קישור שהוא לא יוטיוב, הבוט ינסה להוריד כקובץ ישיר
+    generic_urls = [url for url in urls if url not in youtube_urls and 'notebooklm.google' not in url]
 
     os.makedirs('downloads', exist_ok=True)
     download_success = False
 
     try:
+        # טיפול ביוטיוב
         if youtube_urls:
             is_audio = not ("וידאו" in subject or "וידאו" in body)
             out_tmpl = 'downloads/%(playlist_title,uploader,extractor_key|Unknown)s/%(album|Singles)s/%(title)s.%(ext)s'
@@ -166,9 +155,10 @@ def process_email(drive_svc, gmail_svc, msg_id):
                 ydl.download(youtube_urls)
             download_success = True
 
-        if notebook_urls:
-            for n_url in notebook_urls:
-                if download_notebooklm_audio(n_url):
+        # טיפול בקבצים ישירים (כמו הקישור שתוציא מהקוד)
+        if generic_urls:
+            for g_url in generic_urls:
+                if download_generic_file(g_url):
                     download_success = True
 
         if not download_success:
@@ -185,9 +175,8 @@ def process_email(drive_svc, gmail_svc, msg_id):
             send_email_reply(gmail_svc, sender_email, f"Re: {subject}", reply_body, msg['threadId'])
             
     except Exception as e:
-        # 🔥 אם קורה משהו לא מתוכנן, הבוט שולח לך למייל את השגיאה המדויקת! 🔥
         error_details = traceback.format_exc()
-        error_msg = f"היי,\n\nהבוט נתקל בבעיה טכנית בזמן שניסה לעבד את הבקשה שלך.\nהנה פרטי השגיאה (הלוג) כדי שתוכל לראות איפה זה נתקע:\n\n{error_details}"
+        error_msg = f"היי,\n\nהבוט נתקל בבעיה טכנית בזמן שניסה לעבד את הבקשה שלך.\nהנה פרטי השגיאה (הלוג):\n\n{error_details}"
         send_email_reply(gmail_svc, sender_email, f"שגיאה בעיבוד: {subject}", error_msg, msg['threadId'])
 
     finally:
