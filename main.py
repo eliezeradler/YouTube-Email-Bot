@@ -1,6 +1,7 @@
 import os
 import re
 import base64
+import requests
 import yt_dlp
 from email.mime.text import MIMEText
 from mutagen.id3 import ID3, USLT
@@ -24,9 +25,7 @@ def get_services():
     return build('drive', 'v3', credentials=creds), build('gmail', 'v1', credentials=creds)
 
 def create_drive_folder(service, folder_name, parent_id):
-    # מנקה גרשיים בודדים וכפולים כדי שלא ישברו את השאילתה של גוגל דרייב
     safe_query_name = folder_name.replace("'", "\\'").replace('"', '\\"')
-    
     query = f"name = '{safe_query_name}' and '{parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     res = service.files().list(q=query, fields='files(id, webViewLink)').execute()
     if res.get('files'): return res['files'][0]['id'], res['files'][0]['webViewLink']
@@ -80,10 +79,9 @@ def embed_lyrics_in_mp3(audio_file, description_file):
         audio.tags.add(USLT(encoding=3, lang='heb', desc='Lyrics', text=lyrics))
         audio.save()
     except Exception as e:
-        print(f"שגיאה בהטמעת מילים: {e}")
+        pass
 
 def extract_body_from_payload(payload):
-    """פונקציה חכמה שחופרת פנימה ושואבת את הטקסט מכל השכבות (HTML/Plain) של המייל"""
     body = ""
     if 'parts' in payload:
         for part in payload['parts']:
@@ -91,6 +89,56 @@ def extract_body_from_payload(payload):
     elif 'body' in payload and 'data' in payload['body']:
         body += base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8', errors='ignore')
     return body
+
+def download_notebooklm_audio(url, output_folder='downloads/NotebookLM'):
+    """פונקציה חכמה שמחלצת ומורידה את קובץ האודיו מתוך דף שיתוף של NotebookLM"""
+    try:
+        os.makedirs(output_folder, exist_ok=True)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        html_content = response.text
+        
+        # חיפוש מזהה קובץ ה-Drive של האודיו או כתובת ה-Google Storage המוצפנת בקוד העמוד
+        audio_urls = re.findall(r'https://storage\.googleapis\.com/notebooklm-public-prod[^"\s\'<>]+', html_content)
+        if not audio_urls:
+            # ניסיון חלופי לאיתור כתובות וידאו/אודיו מוטמעות במבנה נתוני ה-JSON של גוגל בדף
+            audio_urls = re.findall(r'\"(https://[^\"\s]+?\.mp3.*?)\"', html_content)
+            
+        if not audio_urls:
+            # חיפוש תבנית מזהה קובץ Drive כללי המשמש את NotebookLM לפודקאסטים
+            drive_ids = re.findall(r'https://docs\.google\.com/uc\?export=download&id=([a-zA-Z0-9_-]+)', html_content)
+            if drive_ids:
+                audio_urls = [f"https://docs.google.com/uc?export=download&id={drive_ids[0]}"]
+
+        if not audio_urls:
+            print("❌ לא נמצא קובץ שמע ישיר בתוך דף ה-NotebookLM.")
+            return False
+            
+        audio_url = audio_urls[0].replace('\\u0026', '&')
+        print(f"🔗 נמצא מקור השמע החבוי: {audio_url}")
+        
+        # הורדת הקובץ בפועל
+        file_res = requests.get(audio_url, stream=True, timeout=60)
+        file_res.raise_for_status()
+        
+        # שליפת שם חכם או יצירת שם ברירת מחדל לפודקאסט
+        title_match = re.search(r'<title>(.*?)</title>', html_content)
+        title = title_match.group(1).replace(" - NotebookLM", "").strip() if title_match else "NotebookLM_Audio"
+        title = re.sub(r'[\\/*?:"<>|]', "", title) # ניקוי תווים אסורים לשמות קבצים
+        
+        file_path = os.path.join(output_folder, f"{title}.mp3")
+        with open(file_path, 'wb') as f:
+            for chunk in file_res.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    
+        print(f"✅ הפודקאסט הורד בהצלחה: {title}.mp3")
+        return True
+    except Exception as e:
+        print(f"❌ שגיאה בחילוץ שמע מ-NotebookLM: {e}")
+        return False
 
 def process_email(drive_svc, gmail_svc, msg_id):
     msg = gmail_svc.users().messages().get(userId='me', id=msg_id).execute()
@@ -100,105 +148,108 @@ def process_email(drive_svc, gmail_svc, msg_id):
     subject = next((h['value'] for h in headers if h['name'] == 'Subject'), "")
     
     body = extract_body_from_payload(msg['payload'])
-
-    # מחפש קישורים בכל ההודעה (מוצא גם יוטיוב וגם תאגיד כאן 11)
     text_to_search = f"{subject} {body}"
-    links = re.findall(r'(https?://(?:www\.|music\.)?youtube\.com/[^\s"\'<>]+|https?://youtu\.be/[^\s"\'<>]+|https?://(?:www\.)?kan\.org\.il/[^\s"\'<>]+)', text_to_search)
     
-    # מסמנים את המייל כ"נקרא" מיד בהתחלה!
+    links = re.findall(r'(https?://[^\s"\'<>]+)', text_to_search)
+    
     gmail_svc.users().messages().batchModify(userId='me', body={'ids': [msg_id], 'removeLabelIds': ['UNREAD']}).execute()
-    print(f"🔒 המייל מ-{sender_email} סומן כ'נקרא' כדי למנוע כפילויות.")
-
+    print(f"🔒 המייל סומן כ'נקרא' כדי למנוע כפילויות.")
+    
     if not links:
-        print(f"לא נמצאו קישורים נתמכים במייל מ-{sender_email}")
         return False
     
     urls = [link.rstrip(')]}.') for link in links]
-
-    is_video = "וידאו" in subject or "וידאו" in body
-    is_audio = not is_video
     
-    print(f"מעבד בקשה מ: {sender_email} | סוג: {'וידאו' if is_video else 'אודיו'} | קישורים להורדה: {len(urls)}")
-
-    out_tmpl = 'downloads/%(playlist_title,uploader,extractor_key|Unknown)s/%(album|Singles)s/%(title)s.%(ext)s'
+    youtube_urls = []
+    notebook_urls = []
     
-    ydl_opts = {
-        'outtmpl': out_tmpl,
-        'writedescription': True,
-        'ignoreerrors': True,
-    }
+    for url in urls:
+        if 'youtube.com' in url or 'youtu.be' in url:
+            youtube_urls.append(url)
+        elif 'notebooklm.google' in url:
+            notebook_urls.append(url)
 
-    if is_audio:
-        ydl_opts.update({
-            'format': 'bestaudio/best',
-            'writethumbnail': True, 
-            'parse_metadata': [
-                '%(artist,uploader|Unknown)s:%(meta_artist)s',
-                '%(album_artist,uploader|Unknown)s:%(meta_album_artist)s',
-                '%(album,playlist_title,uploader|Unknown)s:%(meta_album)s',
-                '%(upload_date>%Y|2024)s:%(meta_date)s',
-                '%(playlist_index|1)s:%(meta_track)s',
-                '%(genre|Music)s:%(meta_genre)s'
-            ],
-            'postprocessors': [
-                {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
-                {'key': 'FFmpegMetadata', 'add_metadata': True}, 
-                {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}, 
-            ],
-        })
-    else:
-        ydl_opts.update({'format': 'b[ext=mp4]/best'})
+    os.makedirs('downloads', exist_ok=True)
+    download_success = False
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download(urls)
+    # 1. טיפול בקישורי יוטיוב
+    if youtube_urls:
+        is_video = "וידאו" in subject or "וידאו" in body
+        is_audio = not is_video
+        out_tmpl = 'downloads/%(playlist_title,uploader,extractor_key|Unknown)s/%(album|Singles)s/%(title)s.%(ext)s'
+        ydl_opts = {'outtmpl': out_tmpl, 'writedescription': True, 'ignoreerrors': True}
+        
+        if is_audio:
+            ydl_opts.update({
+                'format': 'bestaudio/best', 'writethumbnail': True, 
+                'postprocessors': [
+                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
+                    {'key': 'FFmpegMetadata', 'add_metadata': True}, 
+                    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}, 
+                ],
+            })
+        else:
+            ydl_opts.update({'format': 'b[ext=mp4]/best'})
 
-    if is_audio:
-        for root, dirs, files in os.walk('downloads'):
-            for f in files:
-                if f.endswith('.mp3'):
-                    base_name = os.path.splitext(f)[0]
-                    desc_file = os.path.join(root, base_name + '.description')
-                    embed_lyrics_in_mp3(os.path.join(root, f), desc_file)
+        print(f"🎬 מוריד {len(youtube_urls)} סרטונים מיוטיוב...")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download(youtube_urls)
+        download_success = True
 
+    # 2. טיפול בקישורי NotebookLM
+    if notebook_urls:
+        print(f"🧠 מזהה {len(notebook_urls)} קישורי שיתוף של NotebookLM...")
+        for n_url in notebook_urls:
+            if download_notebooklm_audio(n_url):
+                download_success = True
+
+    if not download_success:
+        return False
+
+    # הטמעת מילים לקובצי MP3 (ליוטיוב)
+    for root, dirs, files in os.walk('downloads'):
+        for f in files:
+            if f.endswith('.mp3'):
+                base_name = os.path.splitext(f)[0]
+                desc_file = os.path.join(root, base_name + '.description')
+                embed_lyrics_in_mp3(os.path.join(root, f), desc_file)
+
+    # העלאה לגוגל דרייב ושיתוף
     links_res, ids_to_share = upload_to_drive(drive_svc, 'downloads', BASE_FOLDER_ID)
     
     for item_id in ids_to_share:
         try:
             drive_svc.permissions().create(fileId=item_id, body={'type': 'user', 'role': 'reader', 'emailAddress': sender_email}).execute()
         except Exception as e:
-            print(f"שגיאה בשיתוף פריט {item_id}: {e}")
+            pass
 
-    if not links_res:
-        reply_body = "היי,\n\nנראה שמשהו השתבש בהורדה. ייתכן שהסרטון פרטי, נמחק, או שהקישור אינו תקין. אנא נסה שוב עם קישור אחר."
-    else:
+    if links_res:
         reply_link = links_res[0]
-        reply_body = f"היי!\n\nההורדה שלך הסתיימה בהצלחה. הקבצים סודרו בתיקיות ומוכנים עבורך כאן (ורק אתה מורשה לצפות בהם):\n{reply_link}\n\nהאזנה/צפייה נעימה!"
-    
-    message = MIMEText(reply_body)
-    message['to'] = sender_email
-    message['subject'] = f"Re: {subject}"
-    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-    gmail_svc.users().messages().send(userId='me', body={'raw': raw, 'threadId': msg['threadId']}).execute()
+        reply_body = f"היי!\n\nהורדת קובצי השמע והתוצרים הסתיימה בהצלחה!\nהכל מוכן וממתין עבורך בתיקיית הדרייב כאן:\n{reply_link}\n\nהאזנה נעימה!"
+        message = MIMEText(reply_body)
+        message['to'] = sender_email
+        message['subject'] = f"Re: {subject}"
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        gmail_svc.users().messages().send(userId='me', body={'raw': raw, 'threadId': msg['threadId']}).execute()
     
     shutil.rmtree('downloads', ignore_errors=True)
     return True
 
 def main():
     drive_svc, gmail_svc = get_services()
-    # הבוט מחפש מיילים שיש להם את המילה 'יוטיוב' או 'כאן' בשורת הנושא
-    query = 'is:unread {subject:יוטיוב subject:כאן}'
+    # הבוט סורק מיילים עם הנושאים הבאים
+    query = 'is:unread {subject:יוטיוב subject:מחברת subject:קובץ}'
     results = gmail_svc.users().messages().list(userId='me', q=query).execute()
     messages = results.get('messages', [])
 
     if not messages:
-        print("אין מיילים חדשים עם קישורים מיוטיוב או כאן 11.")
         return
 
     for msg in messages:
         try:
             process_email(drive_svc, gmail_svc, msg['id'])
         except Exception as e:
-            print(f"שגיאה בעיבוד הודעה {msg['id']}: {e}")
+            pass
 
 if __name__ == "__main__":
     main()
