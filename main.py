@@ -141,7 +141,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
                 '%(genre|Music)s:%(meta_genre)s'
             ],
             'postprocessors': [
-                {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
+                {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'},
                 {'key': 'FFmpegMetadata', 'add_metadata': True}, 
                 {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}, 
             ],
