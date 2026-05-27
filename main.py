@@ -86,10 +86,12 @@ def extract_body_from_payload(payload):
     return body
 
 def download_generic_file(url, output_folder='downloads/Files'):
-    """פונקציה להורדת קישורים ישירים (כמו האודיו של NotebookLM ששלפנו)"""
+    """פונקציה להורדת קישורים ישירים (כמו האודיו של NotebookLM)"""
     try:
         os.makedirs(output_folder, exist_ok=True)
-        response = requests.get(url, stream=True, timeout=30)
+        # זיוף דפדפן כדי שהשרת לא יחסום בוטים
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, stream=True, timeout=30)
         response.raise_for_status()
         
         filename = ""
@@ -130,10 +132,16 @@ def process_email(drive_svc, gmail_svc, msg_id):
     if not links:
         return False
     
-    urls = [link.rstrip(')]}.') for link in links]
-    
+    # === התיקון שלנו: ניקוי הקישורים! ===
+    urls = []
+    for link in links:
+        clean_link = link.rstrip(')]}.')
+        # מתקן עיוותים של המייל ושל העתקה מקוד (הופך HTML Entities חזרה ל-&)
+        clean_link = clean_link.replace('&amp;', '&').replace('\\u0026', '&')
+        if clean_link not in urls:
+            urls.append(clean_link)
+            
     youtube_urls = [url for url in urls if 'youtube.com' in url or 'youtu.be' in url]
-    # כל קישור שהוא לא יוטיוב, הבוט ינסה להוריד כקובץ ישיר
     generic_urls = [url for url in urls if url not in youtube_urls and 'notebooklm.google' not in url]
 
     os.makedirs('downloads', exist_ok=True)
@@ -155,7 +163,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
                 ydl.download(youtube_urls)
             download_success = True
 
-        # טיפול בקבצים ישירים (כמו הקישור שתוציא מהקוד)
+        # טיפול בקבצים ישירים
         if generic_urls:
             for g_url in generic_urls:
                 if download_generic_file(g_url):
