@@ -42,44 +42,6 @@ def create_drive_folder(service, folder_name, parent_id):
     file = service.files().create(body=metadata, fields='id, webViewLink').execute()
     return file['id'], file['webViewLink']
 
-def upload_to_drive(service, local_path, parent_drive_id):
-    uploaded_links = []
-    items_to_share = [] 
-    
-    if not os.path.exists(local_path):
-        return [], []
-
-    folder_mapping = {'.': parent_drive_id}
-    
-    for root, dirs, files in os.walk(local_path):
-        rel_path = os.path.relpath(root, local_path)
-        current_parent = folder_mapping.get(rel_path, parent_drive_id)
-        
-        for d in dirs:
-            dir_path = os.path.normpath(os.path.join(rel_path, d))
-            folder_id, folder_link = create_drive_folder(service, d, current_parent)
-            folder_mapping[dir_path] = folder_id
-            if folder_link not in uploaded_links: 
-                uploaded_links.append(folder_link)
-            if rel_path == '.':
-                items_to_share.append(folder_id)
-                
-        for f in files:
-            file_path = os.path.join(root, f)
-            
-            # סינון קבצי טקסט ותמונות - לא עולים לדרייב
-            if file_path.endswith('.description'): continue
-            if any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']): continue
-            
-            media = MediaFileUpload(file_path, resumable=True)
-            # בקשת הקישור מגוגל כדי למנוע את קריסת ה-KeyError
-            file = service.files().create(body={'name': f, 'parents': [current_parent]}, media_body=media, fields='id, webViewLink').execute()
-            uploaded_links.append(file['webViewLink'])
-            if rel_path == '.':
-                items_to_share.append(file['id'])
-            
-    return uploaded_links, items_to_share
-
 def embed_lyrics_in_mp3(audio_file, description_file):
     if not os.path.exists(description_file): return
     with open(description_file, 'r', encoding='utf-8') as df:
@@ -119,63 +81,130 @@ def process_email(drive_svc, gmail_svc, msg_id):
     if not links:
         return False
     
-    urls = [link.rstrip(')]}.') for link in links]
+    urls = []
+    for link in links:
+        clean_link = link.rstrip(')]}.')
+        if clean_link not in urls:
+            urls.append(clean_link)
+            
     is_video = "וידאו" in subject or "וידאו" in body
     is_audio = not is_video
     
-    # מבנה התיקיות החדש - ללא תיקיית Singles
-    out_tmpl = 'downloads/%(playlist_title,uploader,extractor_key|Unknown)s/%(title)s.%(ext)s'
-    
-    ydl_opts = {
-        'outtmpl': out_tmpl,
-        'writedescription': True,
-        'ignoreerrors': True,
-    }
-
-    if is_audio:
-        ydl_opts.update({
-            'format': 'bestaudio/best',
-            'writethumbnail': True, 
-            'postprocessors': [
-                {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
-                {'key': 'FFmpegMetadata', 'add_metadata': True}, 
-                {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}, 
-            ],
-        })
-    else:
-        ydl_opts.update({'format': 'b[ext=mp4]/best'})
-
-    os.makedirs('downloads', exist_ok=True)
-
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download(urls)
-
-        if is_audio:
-            for root, dirs, files in os.walk('downloads'):
-                for f in files:
-                    if f.endswith('.mp3'):
-                        base_name = os.path.splitext(f)[0]
-                        desc_file = os.path.join(root, base_name + '.description')
-                        embed_lyrics_in_mp3(os.path.join(root, f), desc_file)
-
-        links_res, ids_to_share = upload_to_drive(drive_svc, 'downloads', BASE_FOLDER_ID)
+        # 1. 🔥 חוק 1: יצירת תיקייה ייעודית למייל הנוכחי בדרייב ושיתופה עם השולח 🔥
+        email_folder_name = f"הורדה - {subject}"
+        email_folder_id, email_folder_link = create_drive_folder(drive_svc, email_folder_name, BASE_FOLDER_ID)
         
-        for item_id in ids_to_share:
-            try: drive_svc.permissions().create(fileId=item_id, body={'type': 'user', 'role': 'reader', 'emailAddress': sender_email}).execute()
-            except: pass
+        try:
+            drive_svc.permissions().create(
+                fileId=email_folder_id, 
+                body={'type': 'user', 'role': 'reader', 'emailAddress': sender_email}
+            ).execute()
+        except:
+            pass
 
-        if links_res:
-            reply_body = f"היי!\n\nההורדה הסתיימה בהצלחה. הקבצים מוכנים עבורך כאן:\n{links_res[0]}\n\nהאזנה/צפייה נעימה!"
+        # הגדרות בסיסיות לסריקת הקישורים
+        ydl_opts_info = {
+            'extract_flat': 'in_playlist',
+            'ignoreerrors': True,
+            'geo_bypass_country': 'IL',
+        }
+        
+        has_downloaded_anything = False
+
+        # 2. 🔥 חוק 2: מעבר על הקישורים בנפרד ליישום לוגיקת אלבומים/שירים בודדים 🔥
+        for url in urls:
+            source_title = ""
+            entries = []
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    if info:
+                        if 'entries' in info:
+                            entries = [e for e in info['entries'] if e]
+                            source_title = info.get('title', '')
+                        else:
+                            entries = [info]
+            except:
+                continue
+
+            if not entries:
+                continue
+
+            # קביעת תיקיית היעד לקישור הנוכחי בתוך תיקיית המייל
+            if len(entries) > 1 and source_title:
+                safe_playlist_title = "".join([c for c in source_title if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
+                if safe_playlist_title:
+                    target_folder_id, _ = create_drive_folder(drive_svc, safe_playlist_title, email_folder_id)
+                else:
+                    target_folder_id = email_folder_id
+            else:
+                # שיר בודד - נזרק ישירות לתיקיית המייל הראשית
+                target_folder_id = email_folder_id
+
+            # הורדה זמנית מקומית
+            shutil.rmtree('downloads_temp', ignore_errors=True)
+            os.makedirs('downloads_temp', exist_ok=True)
+
+            ydl_opts = {
+                'outtmpl': 'downloads_temp/%(title)s.%(ext)s',
+                'writedescription': True,
+                'ignoreerrors': True,
+            }
+
+            if is_audio:
+                ydl_opts.update({
+                    'format': 'bestaudio/best',
+                    'writethumbnail': True, 
+                    'postprocessors': [
+                        {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
+                        {'key': 'FFmpegMetadata', 'add_metadata': True}, 
+                        {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}, 
+                    ],
+                })
+            else:
+                ydl_opts.update({'format': 'b[ext=mp4]/best'})
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl_dl:
+                ydl_dl.download([url])
+
+            if is_audio:
+                for root, dirs, files in os.walk('downloads_temp'):
+                    for f in files:
+                        if f.endswith('.mp3'):
+                            base_name = os.path.splitext(f)[0]
+                            desc_file = os.path.join(root, base_name + '.description')
+                            embed_lyrics_in_mp3(os.path.join(root, f), desc_file)
+
+            # העלאת הקבצים לתיקיית היעד שנקבעה (הראשית או תיקיית האלבום)
+            for root, dirs, files in os.walk('downloads_temp'):
+                for f in files:
+                    file_path = os.path.join(root, f)
+                    if file_path.endswith('.description'): continue
+                    if any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']): continue
+                    
+                    try:
+                        media = MediaFileUpload(file_path, resumable=True)
+                        drive_svc.files().create(
+                            body={'name': f, 'parents': [target_folder_id]}, 
+                            media_body=media, 
+                            fields='id'
+                        ).execute()
+                        has_downloaded_anything = True
+                    except:
+                        pass
+
+            shutil.rmtree('downloads_temp', ignore_errors=True)
+
+        # שליחת תשובה עם הקישור לתיקיית המייל המרכזית
+        if has_downloaded_anything:
+            reply_body = f"היי!\n\nההורדה הסתיימה בהצלחה. כל הקבצים מאורגנים ומחכים לך בתיקיית המייל המיוחדת שלך כאן:\n{email_folder_link}\n\nהאזנה/צפייה נעימה!"
             send_email_reply(gmail_svc, sender_email, f"Re: {subject}", reply_body, msg['threadId'])
             
     except Exception as e:
         error_details = traceback.format_exc()
         error_msg = f"היי,\n\nהבוט נתקל בבעיה טכנית בזמן שניסה לעבד את הבקשה שלך.\nהנה פרטי השגיאה (הלוג):\n\n{error_details}"
         send_email_reply(gmail_svc, sender_email, f"שגיאה בעיבוד: {subject}", error_msg, msg['threadId'])
-    
-    finally:
-        shutil.rmtree('downloads', ignore_errors=True)
         
     return True
 
