@@ -67,12 +67,13 @@ def upload_to_drive(service, local_path, parent_drive_id):
         for f in files:
             file_path = os.path.join(root, f)
             
-            # 🔥 תיקון 2: חוסם העלאת קבצי תיאור ותמונות נפרדות לגוגל דרייב 🔥
+            # סינון קבצי טקסט ותמונות - לא עולים לדרייב
             if file_path.endswith('.description'): continue
             if any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']): continue
             
             media = MediaFileUpload(file_path, resumable=True)
-            file = service.files().create(body={'name': f, 'parents': [current_parent]}, media_body=media).execute()
+            # בקשת הקישור מגוגל כדי למנוע את קריסת ה-KeyError
+            file = service.files().create(body={'name': f, 'parents': [current_parent]}, media_body=media, fields='id, webViewLink').execute()
             uploaded_links.append(file['webViewLink'])
             if rel_path == '.':
                 items_to_share.append(file['id'])
@@ -122,7 +123,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
     is_video = "וידאו" in subject or "וידאו" in body
     is_audio = not is_video
     
-    # 🔥 תיקון 1: מבנה התיקיות נקי ללא תיקיית Singles באמצע 🔥
+    # מבנה התיקיות החדש - ללא תיקיית Singles
     out_tmpl = 'downloads/%(playlist_title,uploader,extractor_key|Unknown)s/%(title)s.%(ext)s'
     
     ydl_opts = {
