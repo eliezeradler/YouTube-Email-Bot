@@ -4,6 +4,7 @@ import base64
 import requests
 import traceback
 import yt_dlp
+from datetime import datetime
 from email.mime.text import MIMEText
 from mutagen.id3 import ID3, USLT
 from mutagen.mp3 import MP3
@@ -33,7 +34,6 @@ def send_email_reply(gmail_svc, to_email, subject, body, thread_id):
     gmail_svc.users().messages().send(userId='me', body={'raw': raw, 'threadId': thread_id}).execute()
 
 def create_drive_folder(service, folder_name, parent_id, always_create=False):
-    # 🔥 תיקון: אם מוגדר תמיד ליצור, מדלגים על הבדיקה של תיקייה קיימת 🔥
     if not always_create:
         safe_query_name = folder_name.replace("'", "\\'").replace('"', '\\"')
         query = f"name = '{safe_query_name}' and '{parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
@@ -93,8 +93,10 @@ def process_email(drive_svc, gmail_svc, msg_id):
     is_audio = not is_video
     
     try:
-        # 🔥 שימוש ב-always_create=True כדי להבטיח תיקייה חדשה ונפרדת לכל הודעה והודעה 🔥
-        email_folder_name = f"הורדה - {subject}"
+        # 🔥 הוספת התאריך והשעה לשם התיקייה כדי למנוע בלבול בדרייב 🔥
+        current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
+        email_folder_name = f"הורדה - {subject} [{current_time}]"
+        
         email_folder_id, email_folder_link = create_drive_folder(drive_svc, email_folder_name, BASE_FOLDER_ID, always_create=True)
         
         try:
@@ -131,7 +133,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
             if not entries:
                 continue
 
-            # קביעת תיקיית היעד (תת-תיקייה לאלבום, או תיקיית המייל הראשית לשיר בודד)
             if len(entries) > 1 and source_title:
                 safe_playlist_title = "".join([c for c in source_title if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
                 if safe_playlist_title:
@@ -185,7 +186,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
                         drive_svc.files().create(
                             body={'name': f, 'parents': [target_folder_id]}, 
                             media_body=media, 
-                            fields='id, webViewLink' # בקשת שדות חובה למניעת KeyError
+                            fields='id, webViewLink'
                         ).execute()
                         has_downloaded_anything = True
                     except:
