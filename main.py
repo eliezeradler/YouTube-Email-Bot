@@ -32,11 +32,13 @@ def send_email_reply(gmail_svc, to_email, subject, body, thread_id):
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     gmail_svc.users().messages().send(userId='me', body={'raw': raw, 'threadId': thread_id}).execute()
 
-def create_drive_folder(service, folder_name, parent_id):
-    safe_query_name = folder_name.replace("'", "\\'").replace('"', '\\"')
-    query = f"name = '{safe_query_name}' and '{parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    res = service.files().list(q=query, fields='files(id, webViewLink)').execute()
-    if res.get('files'): return res['files'][0]['id'], res['files'][0]['webViewLink']
+def create_drive_folder(service, folder_name, parent_id, always_create=False):
+    # 🔥 תיקון: אם מוגדר תמיד ליצור, מדלגים על הבדיקה של תיקייה קיימת 🔥
+    if not always_create:
+        safe_query_name = folder_name.replace("'", "\\'").replace('"', '\\"')
+        query = f"name = '{safe_query_name}' and '{parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        res = service.files().list(q=query, fields='files(id, webViewLink)').execute()
+        if res.get('files'): return res['files'][0]['id'], res['files'][0]['webViewLink']
     
     metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [parent_id]}
     file = service.files().create(body=metadata, fields='id, webViewLink').execute()
@@ -91,9 +93,9 @@ def process_email(drive_svc, gmail_svc, msg_id):
     is_audio = not is_video
     
     try:
-        # 1. 🔥 חוק 1: יצירת תיקייה ייעודית למייל הנוכחי בדרייב ושיתופה עם השולח 🔥
+        # 🔥 שימוש ב-always_create=True כדי להבטיח תיקייה חדשה ונפרדת לכל הודעה והודעה 🔥
         email_folder_name = f"הורדה - {subject}"
-        email_folder_id, email_folder_link = create_drive_folder(drive_svc, email_folder_name, BASE_FOLDER_ID)
+        email_folder_id, email_folder_link = create_drive_folder(drive_svc, email_folder_name, BASE_FOLDER_ID, always_create=True)
         
         try:
             drive_svc.permissions().create(
@@ -103,7 +105,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
         except:
             pass
 
-        # הגדרות בסיסיות לסריקת הקישורים
         ydl_opts_info = {
             'extract_flat': 'in_playlist',
             'ignoreerrors': True,
@@ -112,7 +113,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
         
         has_downloaded_anything = False
 
-        # 2. 🔥 חוק 2: מעבר על הקישורים בנפרד ליישום לוגיקת אלבומים/שירים בודדים 🔥
         for url in urls:
             source_title = ""
             entries = []
@@ -131,18 +131,16 @@ def process_email(drive_svc, gmail_svc, msg_id):
             if not entries:
                 continue
 
-            # קביעת תיקיית היעד לקישור הנוכחי בתוך תיקיית המייל
+            # קביעת תיקיית היעד (תת-תיקייה לאלבום, או תיקיית המייל הראשית לשיר בודד)
             if len(entries) > 1 and source_title:
                 safe_playlist_title = "".join([c for c in source_title if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
                 if safe_playlist_title:
-                    target_folder_id, _ = create_drive_folder(drive_svc, safe_playlist_title, email_folder_id)
+                    target_folder_id, _ = create_drive_folder(drive_svc, safe_playlist_title, email_folder_id, always_create=False)
                 else:
                     target_folder_id = email_folder_id
             else:
-                # שיר בודד - נזרק ישירות לתיקיית המייל הראשית
                 target_folder_id = email_folder_id
 
-            # הורדה זמנית מקומית
             shutil.rmtree('downloads_temp', ignore_errors=True)
             os.makedirs('downloads_temp', exist_ok=True)
 
@@ -176,7 +174,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
                             desc_file = os.path.join(root, base_name + '.description')
                             embed_lyrics_in_mp3(os.path.join(root, f), desc_file)
 
-            # העלאת הקבצים לתיקיית היעד שנקבעה (הראשית או תיקיית האלבום)
             for root, dirs, files in os.walk('downloads_temp'):
                 for f in files:
                     file_path = os.path.join(root, f)
@@ -188,7 +185,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
                         drive_svc.files().create(
                             body={'name': f, 'parents': [target_folder_id]}, 
                             media_body=media, 
-                            fields='id'
+                            fields='id, webViewLink' # בקשת שדות חובה למניעת KeyError
                         ).execute()
                         has_downloaded_anything = True
                     except:
@@ -196,7 +193,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
 
             shutil.rmtree('downloads_temp', ignore_errors=True)
 
-        # שליחת תשובה עם הקישור לתיקיית המייל המרכזית
         if has_downloaded_anything:
             reply_body = f"היי!\n\nההורדה הסתיימה בהצלחה. כל הקבצים מאורגנים ומחכים לך בתיקיית המייל המיוחדת שלך כאן:\n{email_folder_link}\n\nהאזנה/צפייה נעימה!"
             send_email_reply(gmail_svc, sender_email, f"Re: {subject}", reply_body, msg['threadId'])
