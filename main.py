@@ -76,7 +76,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
     
     body = extract_body_from_payload(msg['payload'])
     text_to_search = f"{subject} {body}"
-    links = re.findall(r'(https?://(?:www\.|music\.)?youtube\.com/[^\s"\'<>]+|https?://youtu\.be/[^\s"\'<>]+)', text_to_search)
+    links = re.findall(r'(https?://[^\s"\'<>]+)', text_to_search)
     
     gmail_svc.users().messages().batchModify(userId='me', body={'ids': [msg_id], 'removeLabelIds': ['UNREAD']}).execute()
     
@@ -207,7 +207,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
 
 def main():
     drive_svc, gmail_svc = get_services()
-    query = 'is:unread subject:יוטיוב'
+    query = 'is:unread (subject:יוטיוב OR subject:וידאו)'
     results = gmail_svc.users().messages().list(userId='me', q=query).execute()
     messages = results.get('messages', [])
 
