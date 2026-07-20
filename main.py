@@ -12,7 +12,6 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 import shutil
-from bs4 import BeautifulSoup
 
 # ===== הגדרות =====
 BASE_FOLDER_ID = "12o0xHyXAuj5f3v3nHszVdCKZj8Lxjx-4"
@@ -78,7 +77,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
     body = extract_body_from_payload(msg['payload'])
     text_to_search = f"{subject} {body}"
     
-    # תבנית מעודכנת שתופסת כל קישור אינטרנט סטנדרטי
     links = re.findall(r'(https?://[^\s"\'<>]+)', text_to_search)
     
     gmail_svc.users().messages().batchModify(userId='me', body={'ids': [msg_id], 'removeLabelIds': ['UNREAD']}).execute()
@@ -124,32 +122,22 @@ def process_email(drive_svc, gmail_svc, msg_id):
             
             target_folder_id = email_folder_id
             
-            # 🔥 מסלול Web Scraping אם הנושא הוא טקסט 🔥
+            # 🔥 הורדת הדף המלא כקובץ HTML 🔥
             if is_text:
                 try:
                     headers_req = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
                     res = requests.get(url, headers=headers_req, timeout=15)
                     res.raise_for_status()
                     
-                    soup = BeautifulSoup(res.text, 'html.parser')
+                    # ניצור שם קובץ בטוח לפי הכתובת
+                    safe_name = re.sub(r'[^a-zA-Z0-9א-ת]', '_', url)[:40]
+                    file_path = os.path.join('downloads_temp', f"page_{safe_name}.html")
                     
-                    # מסיר קוד מיותר
-                    for script in soup(["script", "style", "nav", "footer"]):
-                        script.extract()
-                        
-                    text_content = soup.get_text(separator='\n', strip=True)
-                    
-                    page_title = soup.title.string if soup.title else "Scraped_Text"
-                    safe_title = "".join([c for c in page_title if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
-                    if not safe_title:
-                        safe_title = "Text_Document"
-                        
-                    file_path = os.path.join('downloads_temp', f"{safe_title[:50]}.txt")
                     with open(file_path, 'w', encoding='utf-8') as f:
-                        f.write(f"מקור: {url}\n\n{text_content}")
+                        f.write(res.text)
                         
                 except Exception as e:
-                    print(f"שגיאה בחילוץ הטקסט מהאתר: {url}. פרטים: {e}")
+                    print(f"שגיאה בהורדת ה-HTML מהאתר: {url}. פרטים: {e}")
                     continue
             
             # 🔥 מסלול מדיה רגיל (אודיו/וידאו) 🔥
@@ -206,7 +194,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
                                 desc_file = os.path.join(root, base_name + '.description')
                                 embed_lyrics_in_mp3(os.path.join(root, f), desc_file)
 
-            # העלאה משותפת (גם למסמכי טקסט וגם למדיה)
+            # העלאה משותפת לדרייב
             for root, dirs, files in os.walk('downloads_temp'):
                 for f in files:
                     file_path = os.path.join(root, f)
@@ -227,19 +215,18 @@ def process_email(drive_svc, gmail_svc, msg_id):
             shutil.rmtree('downloads_temp', ignore_errors=True)
 
         if has_downloaded_anything:
-            reply_body = f"היי!\n\nהפעולה הסתיימה בהצלחה. כל הקבצים מאורגנים ומחכים לך בתיקיית המייל המיוחדת שלך כאן:\n{email_folder_link}\n\nתהנה!"
+            reply_body = f"היי!\n\nהפעולה הסתיימה בהצלחה. הקבצים מחכים לך בתיקיית הדרייב:\n{email_folder_link}\n\nתהנה!"
             send_email_reply(gmail_svc, sender_email, f"Re: {subject}", reply_body, msg['threadId'])
             
     except Exception as e:
         error_details = traceback.format_exc()
-        error_msg = f"היי,\n\nהבוט נתקל בבעיה טכנית בזמן שניסה לעבד את הבקשה שלך.\nהנה פרטי השגיאה (הלוג):\n\n{error_details}"
+        error_msg = f"היי,\n\nהבוט נתקל בעיה טכנית:\n\n{error_details}"
         send_email_reply(gmail_svc, sender_email, f"שגיאה בעיבוד: {subject}", error_msg, msg['threadId'])
         
     return True
 
 def main():
     drive_svc, gmail_svc = get_services()
-    # הוספת התנאי השלישי - טקסט
     query = 'is:unread (subject:יוטיוב OR subject:וידאו OR subject:טקסט)'
     results = gmail_svc.users().messages().list(userId='me', q=query).execute()
     messages = results.get('messages', [])
