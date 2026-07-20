@@ -13,6 +13,12 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 import shutil
 
+# ספריות ל-Selenium (דפדפן וירטואלי לעקיפת חסימות ואתרים דינמיים)
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+
 # ===== הגדרות =====
 BASE_FOLDER_ID = "12o0xHyXAuj5f3v3nHszVdCKZj8Lxjx-4"
 # ==================
@@ -122,23 +128,37 @@ def process_email(drive_svc, gmail_svc, msg_id):
             
             target_folder_id = email_folder_id
             
-            # 🔥 הורדת הדף המלא כקובץ HTML 🔥
+            # 🔥 חילוץ HTML מלא באמצעות דפדפן וירטואלי (Selenium) 🔥
             if is_text:
+                driver = None
                 try:
-                    headers_req = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-                    res = requests.get(url, headers=headers_req, timeout=15)
-                    res.raise_for_status()
+                    options = Options()
+                    options.add_argument("--headless")  # רץ ברקע בלי ממשק גרפי
+                    options.add_argument("--disable-gpu")
+                    options.add_argument("--no-sandbox")
+                    options.add_argument("--disable-dev-shm-usage")
+                    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                     
-                    # ניצור שם קובץ בטוח לפי הכתובת
+                    service = Service(ChromeDriverManager().install())
+                    driver = webdriver.Chrome(service=service, options=options)
+                    
+                    driver.get(url)
+                    driver.implicitly_wait(6) # המתנה לטעינת התוכן הדינמי
+                    
+                    page_source = driver.page_source
+                    
                     safe_name = re.sub(r'[^a-zA-Z0-9א-ת]', '_', url)[:40]
                     file_path = os.path.join('downloads_temp', f"page_{safe_name}.html")
                     
                     with open(file_path, 'w', encoding='utf-8') as f:
-                        f.write(res.text)
+                        f.write(page_source)
                         
                 except Exception as e:
-                    print(f"שגיאה בהורדת ה-HTML מהאתר: {url}. פרטים: {e}")
+                    print(f"שגיאה בהפעלת הדפדפן הווירטואלי עבור {url}: {e}")
                     continue
+                finally:
+                    if driver:
+                        driver.quit()
             
             # 🔥 מסלול מדיה רגיל (אודיו/וידאו) 🔥
             else:
