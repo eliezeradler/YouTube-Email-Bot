@@ -12,6 +12,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 import shutil
+from bs4 import BeautifulSoup
 
 # ===== הגדרות =====
 BASE_FOLDER_ID = "12o0xHyXAuj5f3v3nHszVdCKZj8Lxjx-4"
@@ -76,6 +77,8 @@ def process_email(drive_svc, gmail_svc, msg_id):
     
     body = extract_body_from_payload(msg['payload'])
     text_to_search = f"{subject} {body}"
+    
+    # תבנית מעודכנת שתופסת כל קישור אינטרנט סטנדרטי
     links = re.findall(r'(https?://[^\s"\'<>]+)', text_to_search)
     
     gmail_svc.users().messages().batchModify(userId='me', body={'ids': [msg_id], 'removeLabelIds': ['UNREAD']}).execute()
@@ -89,11 +92,11 @@ def process_email(drive_svc, gmail_svc, msg_id):
         if clean_link not in urls:
             urls.append(clean_link)
             
-    is_video = "וידאו" in subject or "וידאו" in body
-    is_audio = not is_video
+    is_text = "טקסט" in subject
+    is_video = "וידאו" in subject
+    is_audio = not is_video and not is_text
     
     try:
-        # 🔥 הוספת התאריך והשעה לשם התיקייה כדי למנוע בלבול בדרייב 🔥
         current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
         email_folder_name = f"הורדה - {subject} [{current_time}]"
         
@@ -116,65 +119,94 @@ def process_email(drive_svc, gmail_svc, msg_id):
         has_downloaded_anything = False
 
         for url in urls:
-            source_title = ""
-            entries = []
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    if info:
-                        if 'entries' in info:
-                            entries = [e for e in info['entries'] if e]
-                            source_title = info.get('title', '')
-                        else:
-                            entries = [info]
-            except:
-                continue
-
-            if not entries:
-                continue
-
-            if len(entries) > 1 and source_title:
-                safe_playlist_title = "".join([c for c in source_title if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
-                if safe_playlist_title:
-                    target_folder_id, _ = create_drive_folder(drive_svc, safe_playlist_title, email_folder_id, always_create=False)
-                else:
-                    target_folder_id = email_folder_id
-            else:
-                target_folder_id = email_folder_id
-
             shutil.rmtree('downloads_temp', ignore_errors=True)
             os.makedirs('downloads_temp', exist_ok=True)
-
-            ydl_opts = {
-                'outtmpl': 'downloads_temp/%(title)s.%(ext)s',
-                'writedescription': True,
-                'ignoreerrors': True,
-            }
-
-            if is_audio:
-                ydl_opts.update({
-                    'format': 'bestaudio/best',
-                    'writethumbnail': True, 
-                    'postprocessors': [
-                        {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
-                        {'key': 'FFmpegMetadata', 'add_metadata': True}, 
-                        {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}, 
-                    ],
-                })
+            
+            target_folder_id = email_folder_id
+            
+            # 🔥 מסלול Web Scraping אם הנושא הוא טקסט 🔥
+            if is_text:
+                try:
+                    headers_req = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                    res = requests.get(url, headers=headers_req, timeout=15)
+                    res.raise_for_status()
+                    
+                    soup = BeautifulSoup(res.text, 'html.parser')
+                    
+                    # מסיר קוד מיותר
+                    for script in soup(["script", "style", "nav", "footer"]):
+                        script.extract()
+                        
+                    text_content = soup.get_text(separator='\n', strip=True)
+                    
+                    page_title = soup.title.string if soup.title else "Scraped_Text"
+                    safe_title = "".join([c for c in page_title if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
+                    if not safe_title:
+                        safe_title = "Text_Document"
+                        
+                    file_path = os.path.join('downloads_temp', f"{safe_title[:50]}.txt")
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(f"מקור: {url}\n\n{text_content}")
+                        
+                except Exception as e:
+                    print(f"שגיאה בחילוץ הטקסט מהאתר: {url}. פרטים: {e}")
+                    continue
+            
+            # 🔥 מסלול מדיה רגיל (אודיו/וידאו) 🔥
             else:
-                ydl_opts.update({'format': 'b[ext=mp4]/best'})
+                source_title = ""
+                entries = []
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                        if info:
+                            if 'entries' in info:
+                                entries = [e for e in info['entries'] if e]
+                                source_title = info.get('title', '')
+                            else:
+                                entries = [info]
+                except:
+                    continue
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl_dl:
-                ydl_dl.download([url])
+                if not entries:
+                    continue
 
-            if is_audio:
-                for root, dirs, files in os.walk('downloads_temp'):
-                    for f in files:
-                        if f.endswith('.mp3'):
-                            base_name = os.path.splitext(f)[0]
-                            desc_file = os.path.join(root, base_name + '.description')
-                            embed_lyrics_in_mp3(os.path.join(root, f), desc_file)
+                if len(entries) > 1 and source_title:
+                    safe_playlist_title = "".join([c for c in source_title if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
+                    if safe_playlist_title:
+                        target_folder_id, _ = create_drive_folder(drive_svc, safe_playlist_title, email_folder_id, always_create=False)
+                
+                ydl_opts = {
+                    'outtmpl': 'downloads_temp/%(title)s.%(ext)s',
+                    'writedescription': True,
+                    'ignoreerrors': True,
+                }
 
+                if is_audio:
+                    ydl_opts.update({
+                        'format': 'bestaudio/best',
+                        'writethumbnail': True, 
+                        'postprocessors': [
+                            {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
+                            {'key': 'FFmpegMetadata', 'add_metadata': True}, 
+                            {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}, 
+                        ],
+                    })
+                else:
+                    ydl_opts.update({'format': 'b[ext=mp4]/best'})
+
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl_dl:
+                    ydl_dl.download([url])
+
+                if is_audio:
+                    for root, dirs, files in os.walk('downloads_temp'):
+                        for f in files:
+                            if f.endswith('.mp3'):
+                                base_name = os.path.splitext(f)[0]
+                                desc_file = os.path.join(root, base_name + '.description')
+                                embed_lyrics_in_mp3(os.path.join(root, f), desc_file)
+
+            # העלאה משותפת (גם למסמכי טקסט וגם למדיה)
             for root, dirs, files in os.walk('downloads_temp'):
                 for f in files:
                     file_path = os.path.join(root, f)
@@ -195,7 +227,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
             shutil.rmtree('downloads_temp', ignore_errors=True)
 
         if has_downloaded_anything:
-            reply_body = f"היי!\n\nההורדה הסתיימה בהצלחה. כל הקבצים מאורגנים ומחכים לך בתיקיית המייל המיוחדת שלך כאן:\n{email_folder_link}\n\nהאזנה/צפייה נעימה!"
+            reply_body = f"היי!\n\nהפעולה הסתיימה בהצלחה. כל הקבצים מאורגנים ומחכים לך בתיקיית המייל המיוחדת שלך כאן:\n{email_folder_link}\n\nתהנה!"
             send_email_reply(gmail_svc, sender_email, f"Re: {subject}", reply_body, msg['threadId'])
             
     except Exception as e:
@@ -207,7 +239,8 @@ def process_email(drive_svc, gmail_svc, msg_id):
 
 def main():
     drive_svc, gmail_svc = get_services()
-    query = 'is:unread (subject:יוטיוב OR subject:וידאו)'
+    # הוספת התנאי השלישי - טקסט
+    query = 'is:unread (subject:יוטיוב OR subject:וידאו OR subject:טקסט)'
     results = gmail_svc.users().messages().list(userId='me', q=query).execute()
     messages = results.get('messages', [])
 
