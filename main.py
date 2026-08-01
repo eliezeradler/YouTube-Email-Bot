@@ -13,19 +13,29 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 import shutil
 
-# ספריות ל-Selenium (דפדפן וירטואלי לעקיפת חסימות ואתרים דינמיים)
+# ספריות ל-Selenium (דפדפן וירטואלי)
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
+# ספריות לטלגרם
+from telethon.sync import TelegramClient
+from telethon.sessions import StringSession
+
 # ===== הגדרות =====
 BASE_FOLDER_ID = "12o0xHyXAuj5f3v3nHszVdCKZj8Lxjx-4"
 # ==================
 
-CLIENT_ID = os.environ['GDRIVE_CLIENT_ID']
-CLIENT_SECRET = os.environ['GDRIVE_CLIENT_SECRET']
-REFRESH_TOKEN = os.environ['GDRIVE_REFRESH_TOKEN']
+# נתוני גוגל
+CLIENT_ID = os.environ.get('GDRIVE_CLIENT_ID')
+CLIENT_SECRET = os.environ.get('GDRIVE_CLIENT_SECRET')
+REFRESH_TOKEN = os.environ.get('GDRIVE_REFRESH_TOKEN')
+
+# נתוני טלגרם
+TG_API_ID = os.environ.get('TELEGRAM_API_ID')
+TG_API_HASH = os.environ.get('TELEGRAM_API_HASH')
+TG_SESSION = os.environ.get('TELEGRAM_SESSION_STRING')
 
 def get_services():
     creds = Credentials(token=None, refresh_token=REFRESH_TOKEN, token_uri="https://oauth2.googleapis.com/token",
@@ -128,12 +138,38 @@ def process_email(drive_svc, gmail_svc, msg_id):
             
             target_folder_id = email_folder_id
             
-            # 🔥 חילוץ HTML מלא באמצעות דפדפן וירטואלי (Selenium) 🔥
-            if is_text:
+            # 🔥 מסלול טלגרם 🔥
+            if 't.me/' in url:
+                try:
+                    if not (TG_API_ID and TG_API_HASH and TG_SESSION):
+                        print("הגדרות טלגרם חסרות בשרת. מדלג.")
+                        continue
+                        
+                    parts = url.rstrip('/').split('/')
+                    msg_id = int(parts[-1])
+                    
+                    if 'c' in parts: # ערוץ פרטי
+                        entity = int('-100' + parts[-2])
+                    else: # ערוץ ציבורי
+                        entity = parts[-2]
+                    
+                    with TelegramClient(StringSession(TG_SESSION), int(TG_API_ID), TG_API_HASH) as client:
+                        message = client.get_messages(entity, ids=msg_id)
+                        if message and message.media:
+                            client.download_media(message, 'downloads_temp')
+                        else:
+                            print(f"לא נמצאה מדיה בקישור: {url}")
+                            
+                except Exception as e:
+                    print(f"שגיאה בהורדה מטלגרם: {e}")
+                    continue
+
+            # 🔥 מסלול טקסט (HTML) 🔥
+            elif is_text:
                 driver = None
                 try:
                     options = Options()
-                    options.add_argument("--headless")  # רץ ברקע בלי ממשק גרפי
+                    options.add_argument("--headless")
                     options.add_argument("--disable-gpu")
                     options.add_argument("--no-sandbox")
                     options.add_argument("--disable-dev-shm-usage")
@@ -143,10 +179,9 @@ def process_email(drive_svc, gmail_svc, msg_id):
                     driver = webdriver.Chrome(service=service, options=options)
                     
                     driver.get(url)
-                    driver.implicitly_wait(6) # המתנה לטעינת התוכן הדינמי
+                    driver.implicitly_wait(6)
                     
                     page_source = driver.page_source
-                    
                     safe_name = re.sub(r'[^a-zA-Z0-9א-ת]', '_', url)[:40]
                     file_path = os.path.join('downloads_temp', f"page_{safe_name}.html")
                     
@@ -154,13 +189,13 @@ def process_email(drive_svc, gmail_svc, msg_id):
                         f.write(page_source)
                         
                 except Exception as e:
-                    print(f"שגיאה בהפעלת הדפדפן הווירטואלי עבור {url}: {e}")
+                    print(f"שגיאה ב-Selenium עבור {url}: {e}")
                     continue
                 finally:
                     if driver:
                         driver.quit()
             
-            # 🔥 מסלול מדיה רגיל (אודיו/וידאו) 🔥
+            # 🔥 מסלול מדיה רגיל (אודיו/וידאו - YouTube וכו') 🔥
             else:
                 source_title = ""
                 entries = []
@@ -214,7 +249,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
                                 desc_file = os.path.join(root, base_name + '.description')
                                 embed_lyrics_in_mp3(os.path.join(root, f), desc_file)
 
-            # העלאה משותפת לדרייב
+            # העלאה משותפת לדרייב לכל סוגי הקבצים
             for root, dirs, files in os.walk('downloads_temp'):
                 for f in files:
                     file_path = os.path.join(root, f)
@@ -222,6 +257,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
                     if any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']): continue
                     
                     try:
+                        # לוקח קבצים גדולים בחשבון (resumable=True)
                         media = MediaFileUpload(file_path, resumable=True)
                         drive_svc.files().create(
                             body={'name': f, 'parents': [target_folder_id]}, 
@@ -229,8 +265,8 @@ def process_email(drive_svc, gmail_svc, msg_id):
                             fields='id, webViewLink'
                         ).execute()
                         has_downloaded_anything = True
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"שגיאה בהעלאה לדרייב: {e}")
 
             shutil.rmtree('downloads_temp', ignore_errors=True)
 
@@ -240,7 +276,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
             
     except Exception as e:
         error_details = traceback.format_exc()
-        error_msg = f"היי,\n\nהבוט נתקל בעיה טכנית:\n\n{error_details}"
+        error_msg = f"היי,\n\nהבוט נתקל בבעיה טכנית:\n\n{error_details}"
         send_email_reply(gmail_svc, sender_email, f"שגיאה בעיבוד: {subject}", error_msg, msg['threadId'])
         
     return True
