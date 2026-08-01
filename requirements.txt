@@ -6,3 +6,4 @@ mutagen
 selenium
 webdriver-manager
 requests
+telethon
