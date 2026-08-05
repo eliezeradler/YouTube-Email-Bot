@@ -107,7 +107,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
             urls.append(clean_link)
             
     is_text = "טקסט" in subject
-    is_video = "וידאו" in subject
+    is_video = "וידאו" in subject or "וידיאו" in subject
     is_audio = not is_video and not is_text
     
     try:
@@ -145,7 +145,10 @@ def process_email(drive_svc, gmail_svc, msg_id):
                         print("הגדרות טלגרם חסרות בשרת. מדלג.")
                         continue
                         
-                    parts = url.rstrip('/').split('/')
+                    # ניקוי הקישור מפרמטרים נוספים (כמו ?single) למניעת שגיאות
+                    clean_url = url.split('?')[0].rstrip('/')
+                    parts = clean_url.split('/')
+                    
                     msg_id = int(parts[-1])
                     
                     if 'c' in parts: # ערוץ פרטי
@@ -160,6 +163,9 @@ def process_email(drive_svc, gmail_svc, msg_id):
                         else:
                             print(f"לא נמצאה מדיה בקישור: {url}")
                             
+                except ValueError as ve:
+                    print(f"שגיאת משתמש/ערוץ בטלגרם (ייתכן שנמחק או שגוי): {ve}")
+                    continue
                 except Exception as e:
                     print(f"שגיאה בהורדה מטלגרם: {e}")
                     continue
@@ -197,6 +203,11 @@ def process_email(drive_svc, gmail_svc, msg_id):
             
             # 🔥 מסלול מדיה רגיל (אודיו/וידאו - YouTube וכו') 🔥
             else:
+                # דילוג על קישורי תיקיות מדרייב שגורמים לקריסה
+                if 'drive.google.com' in url:
+                    print(f"מדלג על קישור דרייב: {url}")
+                    continue
+
                 source_title = ""
                 entries = []
                 try:
@@ -236,6 +247,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
                         ],
                     })
                 else:
+                    # 🔥 שדרוג איכות הוידאו ל-1080p
                     ydl_opts.update({
                         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
                         'merge_output_format': 'mp4'
@@ -286,7 +298,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
 
 def main():
     drive_svc, gmail_svc = get_services()
-    query = 'is:unread (subject:יוטיוב OR subject:וידאו OR subject:טקסט)'
+    query = 'is:unread (subject:יוטיוב OR subject:וידאו OR subject:טקסט OR subject:וידיאו)'
     results = gmail_svc.users().messages().list(userId='me', q=query).execute()
     messages = results.get('messages', [])
 
