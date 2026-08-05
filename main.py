@@ -236,7 +236,10 @@ def process_email(drive_svc, gmail_svc, msg_id):
                         ],
                     })
                 else:
-                    ydl_opts.update({'format': 'b[ext=mp4]/best'})
+                    ydl_opts.update({
+                        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                        'merge_output_format': 'mp4'
+                    })
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl_dl:
                     ydl_dl.download([url])
