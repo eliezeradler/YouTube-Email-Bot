@@ -22,6 +22,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 # ספריות לטלגרם
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
+from telethon.tl.types import DocumentAttributeFilename, InputMessagesFilterVideo
 
 # ===== הגדרות =====
 BASE_FOLDER_ID = "12o0xHyXAuj5f3v3nHszVdCKZj8Lxjx-4"
@@ -97,7 +98,9 @@ def process_email(drive_svc, gmail_svc, msg_id):
     
     gmail_svc.users().messages().batchModify(userId='me', body={'ids': [msg_id], 'removeLabelIds': ['UNREAD']}).execute()
     
-    if not links:
+    is_search = "חיפוש" in subject
+    
+    if not links and not is_search:
         return False
     
     urls = []
@@ -108,7 +111,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
             
     is_text = "טקסט" in subject
     is_video = "וידאו" in subject or "וידיאו" in subject
-    is_audio = not is_video and not is_text
+    is_audio = not is_video and not is_text and not is_search
     
     try:
         current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
@@ -124,13 +127,58 @@ def process_email(drive_svc, gmail_svc, msg_id):
         except:
             pass
 
+        has_downloaded_anything = False
+
+        # 🔥 מסלול חיפוש בטלגרם 🔥
+        if is_search:
+            try:
+                if not (TG_API_ID and TG_API_HASH and TG_SESSION):
+                    print("הגדרות טלגרם חסרות בשרת.")
+                    return False
+                
+                search_query = body.strip()
+                if not search_query:
+                    send_email_reply(gmail_svc, sender_email, f"Re: {subject}", "לא צוין טקסט לחיפוש בגוף המייל.", msg['threadId'])
+                    return True
+
+                with TelegramClient(StringSession(TG_SESSION), int(TG_API_ID), TG_API_HASH) as client:
+                    for dialog in client.iter_dialogs():
+                        entity = dialog.entity
+                        try:
+                            messages = client.iter_messages(
+                                entity,
+                                search=search_query,
+                                filter=InputMessagesFilterVideo,
+                                limit=2
+                            )
+                            for message in messages:
+                                if message and message.media:
+                                    shutil.rmtree('downloads_temp', ignore_errors=True)
+                                    os.makedirs('downloads_temp', exist_ok=True)
+                                    client.download_media(message, 'downloads_temp')
+                                    
+                                    # העלאה לדרייב
+                                    for root, dirs, files in os.walk('downloads_temp'):
+                                        for f in files:
+                                            file_path = os.path.join(root, f)
+                                            media = MediaFileUpload(file_path, resumable=True)
+                                            drive_svc.files().create(
+                                                body={'name': f, 'parents': [email_folder_id]}, 
+                                                media_body=media, 
+                                                fields='id, webViewLink'
+                                            ).execute()
+                                            has_downloaded_anything = True
+                                    shutil.rmtree('downloads_temp', ignore_errors=True)
+                        except Exception as sub_e:
+                            continue
+            except Exception as e:
+                print(f"שגיאה בחיפוש בטלגרם: {e}")
+
         ydl_opts_info = {
             'extract_flat': 'in_playlist',
             'ignoreerrors': True,
             'geo_bypass_country': 'IL',
         }
-        
-        has_downloaded_anything = False
 
         for url in urls:
             shutil.rmtree('downloads_temp', ignore_errors=True)
@@ -138,18 +186,17 @@ def process_email(drive_svc, gmail_svc, msg_id):
             
             target_folder_id = email_folder_id
             
-            # 🔥 מסלול טלגרם 🔥
+            # 🔥 מסלול טלגרם רגיל לפי קישור 🔥
             if 't.me/' in url:
                 try:
                     if not (TG_API_ID and TG_API_HASH and TG_SESSION):
                         print("הגדרות טלגרם חסרות בשרת. מדלג.")
                         continue
                         
-                    # ניקוי הקישור מפרמטרים נוספים (כמו ?single) למניעת שגיאות
                     clean_url = url.split('?')[0].rstrip('/')
                     parts = clean_url.split('/')
                     
-                    msg_id = int(parts[-1])
+                    msg_id_tg = int(parts[-1])
                     
                     if 'c' in parts: # ערוץ פרטי
                         entity = int('-100' + parts[-2])
@@ -157,14 +204,14 @@ def process_email(drive_svc, gmail_svc, msg_id):
                         entity = parts[-2]
                     
                     with TelegramClient(StringSession(TG_SESSION), int(TG_API_ID), TG_API_HASH) as client:
-                        message = client.get_messages(entity, ids=msg_id)
+                        message = client.get_messages(entity, ids=msg_id_tg)
                         if message and message.media:
                             client.download_media(message, 'downloads_temp')
                         else:
                             print(f"לא נמצאה מדיה בקישור: {url}")
                             
                 except ValueError as ve:
-                    print(f"שגיאת משתמש/ערוץ בטלגרם (ייתכן שנמחק או שגוי): {ve}")
+                    print(f"שגיאת משתמש/ערוץ בטלגרם: {ve}")
                     continue
                 except Exception as e:
                     print(f"שגיאה בהורדה מטלגרם: {e}")
@@ -202,8 +249,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
                         driver.quit()
             
             # 🔥 מסלול מדיה רגיל (אודיו/וידאו - YouTube וכו') 🔥
-            else:
-                # דילוג על קישורי תיקיות מדרייב שגורמים לקריסה
+            elif not is_search:
                 if 'drive.google.com' in url:
                     print(f"מדלג על קישור דרייב: {url}")
                     continue
@@ -247,7 +293,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
                         ],
                     })
                 else:
-                    # 🔥 שדרוג איכות הוידאו ל-1080p
                     ydl_opts.update({
                         'format': 'bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best',
                         'merge_output_format': 'mp4'
@@ -272,7 +317,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
                     if any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']): continue
                     
                     try:
-                        # לוקח קבצים גדולים בחשבון (resumable=True)
                         media = MediaFileUpload(file_path, resumable=True)
                         drive_svc.files().create(
                             body={'name': f, 'parents': [target_folder_id]}, 
@@ -288,6 +332,9 @@ def process_email(drive_svc, gmail_svc, msg_id):
         if has_downloaded_anything:
             reply_body = f"היי!\n\nהפעולה הסתיימה בהצלחה. הקבצים מחכים לך בתיקיית הדרייב:\n{email_folder_link}\n\nתהנה!"
             send_email_reply(gmail_svc, sender_email, f"Re: {subject}", reply_body, msg['threadId'])
+        elif is_search:
+            reply_body = f"היי,\n\nהחיפוש בטלגרם הסתיים, אך לא נמצאו קובצי וידאו התואמים את מילת החיפוש."
+            send_email_reply(gmail_svc, sender_email, f"Re: {subject}", reply_body, msg['threadId'])
             
     except Exception as e:
         error_details = traceback.format_exc()
@@ -298,7 +345,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
 
 def main():
     drive_svc, gmail_svc = get_services()
-    query = 'is:unread (subject:יוטיוב OR subject:וידאו OR subject:טקסט OR subject:וידיאו)'
+    query = 'is:unread (subject:יוטיוב OR subject:וידאו OR subject:טקסט OR subject:וידיאו OR subject:חיפוש)'
     results = gmail_svc.users().messages().list(userId='me', q=query).execute()
     messages = results.get('messages', [])
 
