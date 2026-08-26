@@ -23,6 +23,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import DocumentAttributeFilename, InputMessagesFilterVideo
+from telethon.tl.functions.contacts import SearchRequest
 
 # ===== הגדרות =====
 BASE_FOLDER_ID = "12o0xHyXAuj5f3v3nHszVdCKZj8Lxjx-4"
@@ -118,7 +119,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
         email_folder_link = ""
         has_downloaded_anything = False
 
-        # פונקציית עזר ליצירת תיקיית ההורדות רק כשצריך בפועל
         def get_email_folder():
             nonlocal email_folder_id, email_folder_link
             if not email_folder_id:
@@ -140,7 +140,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
             'geo_bypass_country': 'IL',
         }
 
-        # 🔥 מסלול חיפוש בטלגרם 🔥
+        # 🔥 מסלול חיפוש נרחב בטלגרם (כולל ערוצים שלא מחוברים אליהם) 🔥
         if is_search:
             try:
                 if not (TG_API_ID and TG_API_HASH and TG_SESSION):
@@ -153,6 +153,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
                     return True
 
                 with TelegramClient(StringSession(TG_SESSION), int(TG_API_ID), TG_API_HASH) as client:
+                    # 1. סריקת הצ'אטים והערוצים הקיימים
                     for dialog in client.iter_dialogs():
                         entity = dialog.entity
                         try:
@@ -180,14 +181,51 @@ def process_email(drive_svc, gmail_svc, msg_id):
                                             ).execute()
                                             has_downloaded_anything = True
                                     shutil.rmtree('downloads_temp', ignore_errors=True)
-                        except Exception as sub_e:
+                        except Exception:
                             continue
+
+                    # 2. חיפוש גלובלי של ערוצים ציבוריים נוספים ברחבי טלגרם
+                    try:
+                        global_result = client(SearchRequest(q=search_query, limit=10))
+                        for chat in global_result.chats:
+                            try:
+                                messages = client.iter_messages(
+                                    chat,
+                                    search=search_query,
+                                    filter=InputMessagesFilterVideo,
+                                    limit=2
+                                )
+                                for message in messages:
+                                    if message and message.media:
+                                        shutil.rmtree('downloads_temp', ignore_errors=True)
+                                        os.makedirs('downloads_temp', exist_ok=True)
+                                        client.download_media(message, 'downloads_temp')
+                                        
+                                        folder_to_use = get_email_folder()
+                                        for root, dirs, files in os.walk('downloads_temp'):
+                                            for f in files:
+                                                file_path = os.path.join(root, f)
+                                                media = MediaFileUpload(file_path, resumable=True)
+                                                drive_svc.files().create(
+                                                    body={'name': f, 'parents': [folder_to_use]}, 
+                                                    media_body=media, 
+                                                    fields='id, webViewLink'
+                                                ).execute()
+                                                has_downloaded_anything = True
+                                        shutil.rmtree('downloads_temp', ignore_errors=True)
+                            except Exception:
+                                continue
+                    except Exception as ge:
+                        print(f"שגיאה בחיפוש הגלובלי: {ge}")
+
             except Exception as e:
                 print(f"שגיאה בחיפוש בטלגרם: {e}")
 
         for url in urls:
             shutil.rmtree('downloads_temp', ignore_errors=True)
             os.makedirs('downloads_temp', exist_ok=True)
+            
+            target_folder_id = email_folder_id
             
             # 🔥 מסלול טלגרם רגיל לפי קישור 🔥
             if 't.me/' in url:
@@ -201,9 +239,9 @@ def process_email(drive_svc, gmail_svc, msg_id):
                     
                     msg_id_tg = int(parts[-1])
                     
-                    if 'c' in parts: # ערוץ פרטי
+                    if 'c' in parts:
                         entity = int('-100' + parts[-2])
-                    else: # ערוץ ציבורי
+                    else:
                         entity = parts[-2]
                     
                     with TelegramClient(StringSession(TG_SESSION), int(TG_API_ID), TG_API_HASH) as client:
@@ -274,7 +312,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
                 if not entries:
                     continue
 
-                # יצירת התיקייה הראשית רק כשיש תוכן להורדה
                 main_folder_id = get_email_folder()
                 target_folder_id = main_folder_id
 
