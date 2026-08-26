@@ -114,20 +114,31 @@ def process_email(drive_svc, gmail_svc, msg_id):
     is_audio = not is_video and not is_text and not is_search
     
     try:
-        current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
-        email_folder_name = f"הורדה - {subject} [{current_time}]"
-        
-        email_folder_id, email_folder_link = create_drive_folder(drive_svc, email_folder_name, BASE_FOLDER_ID, always_create=True)
-        
-        try:
-            drive_svc.permissions().create(
-                fileId=email_folder_id, 
-                body={'type': 'user', 'role': 'reader', 'emailAddress': sender_email}
-            ).execute()
-        except:
-            pass
-
+        email_folder_id = None
+        email_folder_link = ""
         has_downloaded_anything = False
+
+        # פונקציית עזר ליצירת תיקיית ההורדות רק כשצריך בפועל
+        def get_email_folder():
+            nonlocal email_folder_id, email_folder_link
+            if not email_folder_id:
+                current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
+                email_folder_name = f"הורדה - {subject} [{current_time}]"
+                email_folder_id, email_folder_link = create_drive_folder(drive_svc, email_folder_name, BASE_FOLDER_ID, always_create=True)
+                try:
+                    drive_svc.permissions().create(
+                        fileId=email_folder_id, 
+                        body={'type': 'user', 'role': 'reader', 'emailAddress': sender_email}
+                    ).execute()
+                except:
+                    pass
+            return email_folder_id
+
+        ydl_opts_info = {
+            'extract_flat': 'in_playlist',
+            'ignoreerrors': True,
+            'geo_bypass_country': 'IL',
+        }
 
         # 🔥 מסלול חיפוש בטלגרם 🔥
         if is_search:
@@ -157,13 +168,13 @@ def process_email(drive_svc, gmail_svc, msg_id):
                                     os.makedirs('downloads_temp', exist_ok=True)
                                     client.download_media(message, 'downloads_temp')
                                     
-                                    # העלאה לדרייב
+                                    folder_to_use = get_email_folder()
                                     for root, dirs, files in os.walk('downloads_temp'):
                                         for f in files:
                                             file_path = os.path.join(root, f)
                                             media = MediaFileUpload(file_path, resumable=True)
                                             drive_svc.files().create(
-                                                body={'name': f, 'parents': [email_folder_id]}, 
+                                                body={'name': f, 'parents': [folder_to_use]}, 
                                                 media_body=media, 
                                                 fields='id, webViewLink'
                                             ).execute()
@@ -174,17 +185,9 @@ def process_email(drive_svc, gmail_svc, msg_id):
             except Exception as e:
                 print(f"שגיאה בחיפוש בטלגרם: {e}")
 
-        ydl_opts_info = {
-            'extract_flat': 'in_playlist',
-            'ignoreerrors': True,
-            'geo_bypass_country': 'IL',
-        }
-
         for url in urls:
             shutil.rmtree('downloads_temp', ignore_errors=True)
             os.makedirs('downloads_temp', exist_ok=True)
-            
-            target_folder_id = email_folder_id
             
             # 🔥 מסלול טלגרם רגיל לפי קישור 🔥
             if 't.me/' in url:
@@ -271,10 +274,14 @@ def process_email(drive_svc, gmail_svc, msg_id):
                 if not entries:
                     continue
 
+                # יצירת התיקייה הראשית רק כשיש תוכן להורדה
+                main_folder_id = get_email_folder()
+                target_folder_id = main_folder_id
+
                 if len(entries) > 1 and source_title:
                     safe_playlist_title = "".join([c for c in source_title if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
                     if safe_playlist_title:
-                        target_folder_id, _ = create_drive_folder(drive_svc, safe_playlist_title, email_folder_id, always_create=False)
+                        target_folder_id, _ = create_drive_folder(drive_svc, safe_playlist_title, main_folder_id, always_create=False)
                 
                 ydl_opts = {
                     'outtmpl': 'downloads_temp/%(title)s.%(ext)s',
@@ -317,9 +324,10 @@ def process_email(drive_svc, gmail_svc, msg_id):
                     if any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']): continue
                     
                     try:
+                        folder_to_use = get_email_folder()
                         media = MediaFileUpload(file_path, resumable=True)
                         drive_svc.files().create(
-                            body={'name': f, 'parents': [target_folder_id]}, 
+                            body={'name': f, 'parents': [folder_to_use]}, 
                             media_body=media, 
                             fields='id, webViewLink'
                         ).execute()
