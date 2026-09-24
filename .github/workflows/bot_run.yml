@@ -18,13 +18,20 @@ jobs:
     - name: Install FFmpeg
       run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
+    - name: Setup Deno for yt-dlp
+      uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.x
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         
     - name: Install dependencies
-      run: pip install -r requirements.txt
+      run: |
+        pip install --upgrade pip
+        pip install -U yt-dlp -r requirements.txt
 
     - name: Run Bot
       env:
