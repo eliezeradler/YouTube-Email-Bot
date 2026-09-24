@@ -1,13 +1,15 @@
 import os
+import io
 import re
 import base64
 import requests
 import traceback
 import yt_dlp
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
-from mutagen.id3 import ID3, USLT
+from mutagen.id3 import ID3, USLT, APIC
 from mutagen.mp3 import MP3
+from PIL import Image
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -44,6 +46,21 @@ def get_services():
                         client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
     return build('drive', 'v3', credentials=creds), build('gmail', 'v1', credentials=creds)
 
+def cleanup_old_drive_files(drive_svc):
+    """מחיקת קבצים ותיקיות בתיקיית הבסיס שעברו 24 שעות ממועד יצירתם"""
+    try:
+        cutoff_time = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        query = f"'{BASE_FOLDER_ID}' in parents and createdTime < '{cutoff_time}' and trashed = false"
+        results = drive_svc.files().list(q=query, fields="files(id, name)").execute()
+        for f in results.get('files', []):
+            try:
+                drive_svc.files().delete(fileId=f['id']).execute()
+                print(f"נמחק אוטומטית (עברו 24 שעות): {f['name']}")
+            except Exception as del_err:
+                print(f"שגיאה במחיקת {f['name']}: {del_err}")
+    except Exception as e:
+        print(f"שגיאה בסריקת קבצים ישנים למחיקה: {e}")
+
 def send_email_reply(gmail_svc, to_email, subject, body, thread_id):
     message = MIMEText(body)
     message['to'] = to_email
@@ -62,19 +79,42 @@ def create_drive_folder(service, folder_name, parent_id, always_create=False):
     file = service.files().create(body=metadata, fields='id, webViewLink').execute()
     return file['id'], file['webViewLink']
 
-def embed_lyrics_in_mp3(audio_file, description_file):
-    if not os.path.exists(description_file): return
-    with open(description_file, 'r', encoding='utf-8') as df:
-        lyrics = df.read()
-    if not lyrics.strip(): return
-    
+def process_mp3_metadata(audio_file, description_file, thumbnail_file):
+    """הטמעת מילות השיר ותמונת עטיפה מוקטנת (500x500) לתוך קובץ ה-MP3"""
     try:
         audio = MP3(audio_file, ID3=ID3)
-        if audio.tags is None: audio.add_tags()
-        audio.tags.add(USLT(encoding=3, lang='heb', desc='Lyrics', text=lyrics))
+        if audio.tags is None:
+            audio.add_tags()
+
+        # 1. הטמעת מילות השיר
+        if description_file and os.path.exists(description_file):
+            with open(description_file, 'r', encoding='utf-8') as df:
+                lyrics = df.read().strip()
+            if lyrics:
+                audio.tags.add(USLT(encoding=3, lang='heb', desc='Lyrics', text=lyrics))
+
+        # 2. מזעור והטמעת תמונת עטיפה
+        if thumbnail_file and os.path.exists(thumbnail_file):
+            with Image.open(thumbnail_file) as img:
+                img = img.convert('RGB')
+                img.thumbnail((500, 500))
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format='JPEG', quality=85)
+                img_data = img_byte_arr.getvalue()
+
+            audio.tags.add(
+                APIC(
+                    encoding=3,
+                    mime='image/jpeg',
+                    type=3,
+                    desc='Cover',
+                    data=img_data
+                )
+            )
+
         audio.save()
     except Exception as e:
-        print(f"שגיאה בהטמעת מילים: {e}")
+        print(f"שגיאה בעריכת נתוני ה-MP3: {e}")
 
 def extract_body_from_payload(payload):
     body = ""
@@ -100,8 +140,9 @@ def process_email(drive_svc, gmail_svc, msg_id):
     gmail_svc.users().messages().batchModify(userId='me', body={'ids': [msg_id], 'removeLabelIds': ['UNREAD']}).execute()
     
     is_search = "חיפוש" in subject
+    is_browse = "דפדף" in subject
     
-    if not links and not is_search:
+    if not links and not is_search and not is_browse:
         return False
     
     urls = []
@@ -112,7 +153,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
             
     is_text = "טקסט" in subject
     is_video = "וידאו" in subject or "וידיאו" in subject
-    is_audio = not is_video and not is_text and not is_search
+    is_audio = not is_video and not is_text and not is_search and not is_browse
     
     try:
         email_folder_id = None
@@ -140,7 +181,31 @@ def process_email(drive_svc, gmail_svc, msg_id):
             'geo_bypass_country': 'IL',
         }
 
-        # 🔥 מסלול חיפוש נרחב בטלגרם (כולל ערוצים שלא מחוברים אליהם) 🔥
+        # 🔥 מסלול דפדוף בהודעות אחרונות בערוץ/קבוצה בטלגרם 🔥
+        if is_browse:
+            if not (TG_API_ID and TG_API_HASH and TG_SESSION):
+                print("הגדרות טלגרם חסרות בשרת.")
+                return False
+
+            entity_name = body.strip()
+            if not entity_name:
+                send_email_reply(gmail_svc, sender_email, f"Re: {subject}", "לא צוין שם קבוצה או ערוץ בגוף המייל.", msg['threadId'])
+                return True
+
+            try:
+                with TelegramClient(StringSession(TG_SESSION), int(TG_API_ID), TG_API_HASH) as client:
+                    messages = client.get_messages(entity_name, limit=2)
+                    reply_text = f"2 ההודעות האחרונות מתוך '{entity_name}':\n\n"
+                    for m in messages:
+                        date_str = m.date.strftime("%d-%m-%Y %H:%M") if m.date else ""
+                        content = m.text if m.text else "[קובץ/מדיה ללא טקסט]"
+                        reply_text += f"📅 {date_str}\n💬 {content}\n" + ("-" * 30) + "\n"
+                    send_email_reply(gmail_svc, sender_email, f"Re: {subject}", reply_text, msg['threadId'])
+            except Exception as e:
+                send_email_reply(gmail_svc, sender_email, f"Re: {subject}", f"שגיאה בגישה לקבוצה '{entity_name}': {e}", msg['threadId'])
+            return True
+
+        # 🔥 מסלול חיפוש נרחב בטלגרם 🔥
         if is_search:
             try:
                 if not (TG_API_ID and TG_API_HASH and TG_SESSION):
@@ -153,7 +218,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
                     return True
 
                 with TelegramClient(StringSession(TG_SESSION), int(TG_API_ID), TG_API_HASH) as client:
-                    # 1. סריקת הצ'אטים והערוצים הקיימים
                     for dialog in client.iter_dialogs():
                         entity = dialog.entity
                         try:
@@ -184,7 +248,6 @@ def process_email(drive_svc, gmail_svc, msg_id):
                         except Exception:
                             continue
 
-                    # 2. חיפוש גלובלי של ערוצים ציבוריים נוספים ברחבי טלגרם
                     try:
                         global_result = client(SearchRequest(q=search_query, limit=10))
                         for chat in global_result.chats:
@@ -225,7 +288,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
             shutil.rmtree('downloads_temp', ignore_errors=True)
             os.makedirs('downloads_temp', exist_ok=True)
             
-            target_folder_id = email_folder_id
+            target_folder_id = None
             
             # 🔥 מסלול טלגרם רגיל לפי קישור 🔥
             if 't.me/' in url:
@@ -290,7 +353,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
                         driver.quit()
             
             # 🔥 מסלול מדיה רגיל (אודיו/וידאו - YouTube וכו') 🔥
-            elif not is_search:
+            elif not is_search and not is_browse:
                 if 'drive.google.com' in url:
                     print(f"מדלג על קישור דרייב: {url}")
                     continue
@@ -324,16 +387,16 @@ def process_email(drive_svc, gmail_svc, msg_id):
                     'outtmpl': 'downloads_temp/%(title)s.%(ext)s',
                     'writedescription': True,
                     'ignoreerrors': True,
+                    'geo_bypass_country': 'IL',
                 }
 
                 if is_audio:
                     ydl_opts.update({
                         'format': 'bestaudio/best',
-                        'writethumbnail': True, 
+                        'writethumbnail': True,
                         'postprocessors': [
                             {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
-                            {'key': 'FFmpegMetadata', 'add_metadata': True}, 
-                            {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}, 
+                            {'key': 'FFmpegMetadata', 'add_metadata': True},
                         ],
                     })
                 else:
@@ -350,10 +413,19 @@ def process_email(drive_svc, gmail_svc, msg_id):
                         for f in files:
                             if f.endswith('.mp3'):
                                 base_name = os.path.splitext(f)[0]
+                                mp3_path = os.path.join(root, f)
                                 desc_file = os.path.join(root, base_name + '.description')
-                                embed_lyrics_in_mp3(os.path.join(root, f), desc_file)
+                                
+                                thumbnail_file = None
+                                for ext in ['.jpg', '.webp', '.png', '.jpeg']:
+                                    temp_thumb = os.path.join(root, base_name + ext)
+                                    if os.path.exists(temp_thumb):
+                                        thumbnail_file = temp_thumb
+                                        break
+                                
+                                process_mp3_metadata(mp3_path, desc_file, thumbnail_file)
 
-            # העלאה משותפת לדרייב לכל סוגי הקבצים
+            # העלאה משותפת לדרייב לכל סוגי הקבצים (ללא קובצי העזר של התמונות והתיאור)
             for root, dirs, files in os.walk('downloads_temp'):
                 for f in files:
                     file_path = os.path.join(root, f)
@@ -361,7 +433,7 @@ def process_email(drive_svc, gmail_svc, msg_id):
                     if any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']): continue
                     
                     try:
-                        folder_to_use = get_email_folder()
+                        folder_to_use = target_folder_id or get_email_folder()
                         media = MediaFileUpload(file_path, resumable=True)
                         drive_svc.files().create(
                             body={'name': f, 'parents': [folder_to_use]}, 
@@ -375,10 +447,10 @@ def process_email(drive_svc, gmail_svc, msg_id):
             shutil.rmtree('downloads_temp', ignore_errors=True)
 
         if has_downloaded_anything:
-            reply_body = f"היי!\n\nהפעולה הסתיימה בהצלחה. הקבצים מחכים לך בתיקיית הדרייב:\n{email_folder_link}\n\nתהנה!"
+            reply_body = f"היי!\n\nהפעולה הסתיימה בהצלחה. הקבצים מחכים לך בתיקיית הדרייב (יימחקו אוטומטית בעוד 24 שעות):\n{email_folder_link}\n\nתהנה!"
             send_email_reply(gmail_svc, sender_email, f"Re: {subject}", reply_body, msg['threadId'])
         elif is_search:
-            reply_body = f"היי,\n\nהחיפוש בטלגרם הסתיים, אך לא נמצאו קובצי וידאו התואמים את מילת החיפוש."
+            reply_body = "היי,\n\nהחיפוש בטלגרם הסתיים, אך לא נמצאו קובצי וידאו התואמים את מילת החיפוש."
             send_email_reply(gmail_svc, sender_email, f"Re: {subject}", reply_body, msg['threadId'])
             
     except Exception as e:
@@ -390,7 +462,11 @@ def process_email(drive_svc, gmail_svc, msg_id):
 
 def main():
     drive_svc, gmail_svc = get_services()
-    query = 'is:unread (subject:יוטיוב OR subject:וידאו OR subject:טקסט OR subject:וידיאו OR subject:חיפוש)'
+    
+    # ניקוי אוטומטי של קבצים ותיקיות שעברו 24 שעות
+    cleanup_old_drive_files(drive_svc)
+    
+    query = 'is:unread (subject:יוטיוב OR subject:וידאו OR subject:טקסט OR subject:וידיאו OR subject:חיפוש OR subject:דפדף)'
     results = gmail_svc.users().messages().list(userId='me', q=query).execute()
     messages = results.get('messages', [])
 
